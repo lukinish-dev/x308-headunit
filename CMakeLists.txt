@@ -15,6 +15,8 @@ add_library(x308_core
     src/app/Logger.cpp
     src/cli/Cli.cpp
     src/cli/InteractiveMenu.cpp
+    src/source/SourceManager.cpp
+    src/system/HardwareStubs.cpp
 )
 
 target_include_directories(x308_core
@@ -46,4 +48,3 @@ if(BUILD_TESTING)
     add_test(NAME unit_tests COMMAND x308_unit_tests)
     set_tests_properties(unit_tests PROPERTIES LABELS "unit")
 endif()
-
