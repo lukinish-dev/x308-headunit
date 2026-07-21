@@ -1,0 +1,22 @@
+[application]
+language = "ru"
+startup_timeout_seconds = 10
+
+[mpd]
+host = "localhost"
+port = 6600
+music_directory = "/mnt/music"
+
+[bluetooth]
+adapter = "hci0"
+device_name = "Jaguar XJR"
+auto_connect = true
+discoverable_timeout_seconds = 120
+auto_accept_pairing = true
+
+[audio]
+default_source = "mpd"
+
+[logging]
+level = "info"
+

@@ -11,6 +11,10 @@ include(CTest)
 
 add_library(x308_core
     src/app/App.cpp
+    src/app/Configuration.cpp
+    src/app/Logger.cpp
+    src/cli/Cli.cpp
+    src/cli/InteractiveMenu.cpp
 )
 
 target_include_directories(x308_core
@@ -31,5 +35,15 @@ endif()
 
 if(BUILD_TESTING)
     add_test(NAME app_smoke_test COMMAND x308-headunit --version)
+
+    add_executable(x308_unit_tests
+        tests/unit/TestMain.cpp
+    )
+    target_link_libraries(x308_unit_tests PRIVATE x308_core)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(x308_unit_tests PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    endif()
+    add_test(NAME unit_tests COMMAND x308_unit_tests)
+    set_tests_properties(unit_tests PROPERTIES LABELS "unit")
 endif()
 
