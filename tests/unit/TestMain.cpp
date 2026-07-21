@@ -1,6 +1,7 @@
 #include "x308/Cli.hpp"
 #include "x308/Configuration.hpp"
 #include "x308/SourceManager.hpp"
+#include "x308/MpdClient.hpp"
 
 #include <iostream>
 #include <sstream>
@@ -32,6 +33,7 @@ public:
     x308::Result update() override { return x308::Result::ok(); }
     x308::Result activateAudio() override { calls.emplace_back("mpd.activate"); return x308::Result::ok(); }
     x308::Result releaseAudio() override { calls.emplace_back("mpd.release"); return x308::Result::ok(); }
+    std::string lastError() const override { return {}; }
 };
 
 class FakeBluetooth final : public x308::IBluetoothManager {
@@ -52,6 +54,7 @@ public:
     x308::Result autoConnect() override { return x308::Result::ok(); }
     x308::Result activateAudio() override { calls.emplace_back("bt.activate"); return x308::Result::ok(); }
     x308::Result releaseAudio() override { calls.emplace_back("bt.release"); return x308::Result::ok(); }
+    std::string lastError() const override { return {}; }
 };
 
 class FakeAudioOutput final : public x308::IAudioOutput {
@@ -134,6 +137,14 @@ void testSourceManagerSwitchesToMpdWithoutPowerOff() {
     expect(calls == expected, "Bluetooth stream releases without powering adapter off");
 }
 
+void testMpdModelConversionHandlesMissingTags() {
+    const auto track = x308::MpdClient::trackFromMetadata("folder/song.flac", nullptr, "Artist", nullptr);
+    expect(track.uri == "folder/song.flac", "MPD URI converted");
+    expect(track.title.empty(), "missing title is empty");
+    expect(track.artist == "Artist", "MPD artist converted");
+    expect(track.album.empty(), "missing album is empty");
+}
+
 }  // namespace
 
 int main() {
@@ -143,6 +154,7 @@ int main() {
     testCliErrors();
     testSourceManagerSwitchesToBluetoothInOrder();
     testSourceManagerSwitchesToMpdWithoutPowerOff();
+    testMpdModelConversionHandlesMissingTags();
     if (failures == 0) {
         std::cout << "All unit tests passed\n";
     }

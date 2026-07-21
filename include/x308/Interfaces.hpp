@@ -30,6 +30,7 @@ public:
     [[nodiscard]] virtual Result update() = 0;
     [[nodiscard]] virtual Result activateAudio() = 0;
     [[nodiscard]] virtual Result releaseAudio() = 0;
+    [[nodiscard]] virtual std::string lastError() const = 0;
 };
 
 class IBluetoothManager {
@@ -49,6 +50,7 @@ public:
     [[nodiscard]] virtual Result autoConnect() = 0;
     [[nodiscard]] virtual Result activateAudio() = 0;
     [[nodiscard]] virtual Result releaseAudio() = 0;
+    [[nodiscard]] virtual std::string lastError() const = 0;
 };
 
 class IAudioOutput {
@@ -72,4 +74,3 @@ public:
 };
 
 }  // namespace x308
-
