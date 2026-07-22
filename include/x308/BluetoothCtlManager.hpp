@@ -42,7 +42,9 @@ private:
     class AgentProcess;
 
     [[nodiscard]] ProcessResult execute(const std::vector<std::string>& command,
-                                        std::chrono::seconds timeout = std::chrono::seconds{4});
+                                        std::chrono::milliseconds timeout = std::chrono::seconds{4},
+                                        std::chrono::milliseconds processAllowance =
+                                            std::chrono::seconds{1});
     [[nodiscard]] Result executeAction(const std::vector<std::string>& command,
                                        std::string_view action,
                                        std::chrono::seconds timeout = std::chrono::seconds{4});

@@ -8,9 +8,6 @@
 namespace x308 {
 namespace {
 
-LogLevel minimumLevel = LogLevel::info;
-std::mutex logMutex;
-
 constexpr std::string_view label(const LogLevel level) {
     switch (level) {
         case LogLevel::debug: return "DEBUG";
@@ -23,20 +20,22 @@ constexpr std::string_view label(const LogLevel level) {
 
 }  // namespace
 
+Logger::Logger(const std::string_view level) { setLevel(level); }
+
 void Logger::setLevel(const std::string_view level) {
-    if (level == "debug") minimumLevel = LogLevel::debug;
-    else if (level == "warning" || level == "warn") minimumLevel = LogLevel::warning;
-    else if (level == "error") minimumLevel = LogLevel::error;
-    else minimumLevel = LogLevel::info;
+    const std::lock_guard lock(mutex_);
+    if (level == "debug") minimumLevel_ = LogLevel::debug;
+    else if (level == "warning" || level == "warn") minimumLevel_ = LogLevel::warning;
+    else if (level == "error") minimumLevel_ = LogLevel::error;
+    else minimumLevel_ = LogLevel::info;
 }
 
 void Logger::log(const LogLevel level, const std::string_view message) {
-    if (static_cast<int>(level) < static_cast<int>(minimumLevel)) {
+    const std::lock_guard lock(mutex_);
+    if (static_cast<int>(level) < static_cast<int>(minimumLevel_)) {
         return;
     }
-    const std::lock_guard lock(logMutex);
     std::clog << '[' << label(level) << "] " << message << '\n';
 }
 
 }  // namespace x308
-

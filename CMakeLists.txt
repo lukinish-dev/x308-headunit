@@ -25,6 +25,7 @@ endif()
 
 add_library(x308_core
     src/app/App.cpp
+    src/app/AppContext.cpp
     src/app/Configuration.cpp
     src/app/Logger.cpp
     src/app/SystemStatusService.cpp

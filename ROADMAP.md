@@ -11,12 +11,12 @@
 
 Текущий этап:
 
-🟡 **Milestone 5 — System Status**
+✅ **Architecture Stage — Core Application**
 
 Общее состояние:
 
 ```text
-██████░░░░░░░░░░░░ 30%
+███████░░░░░░░░░░░ 35%
 ```
 
 ---
@@ -60,15 +60,7 @@
 - Timeouts
 - Safe integration tests
 
----
-
-## Current milestone
-
-### Milestone 5 — System Status 🟡
-
-**Цель:** предоставить быстрый read-only отчёт о состоянии системы.
-
-Состав:
+### Milestone 5 — System Status ✅
 
 - SystemStatusService и SystemStatusReport
 - Application и system uptime
@@ -77,10 +69,25 @@
 - Storage status
 - CLI и интерактивное меню
 - Бюджет менее 200 мс
-- ALSA diagnostics
-- Hardware status
 
-Следующий результат: **полный диагностический отчёт с ALSA и hardware probes**.
+---
+
+## Latest completed stage
+
+### Architecture Stage — Core Application ✅
+
+**Цель:** сделать Application единственным composition root проекта.
+
+Состав:
+
+- AppContext с явным владением
+- Единый граф зависимостей
+- Инжектируемые CLI и InteractiveMenu
+- Жизненный цикл Created → Initialized → Running → Stopping → Stopped
+- Единый shutdown
+- Отсутствие дублирующих production services
+
+Результат: **стабильная основа для следующих application services**.
 
 ---
 

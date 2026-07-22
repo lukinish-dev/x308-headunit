@@ -2,6 +2,7 @@
 
 #include <mpd/client.h>
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <utility>
@@ -63,7 +64,9 @@ MpdClient::MpdClient(MpdConfig config, const unsigned timeoutMilliseconds)
 
 MediaStatus MpdClient::status() {
     MediaStatus result;
-    auto connection = connect(config_, timeoutMilliseconds_, lastError_);
+    constexpr unsigned statusTimeoutMilliseconds = 180;
+    auto connection = connect(
+        config_, std::min(timeoutMilliseconds_, statusTimeoutMilliseconds), lastError_);
     if (!connection) {
         result.error = lastError_;
         return result;

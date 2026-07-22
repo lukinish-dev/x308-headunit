@@ -2,9 +2,8 @@
 
 ## 1. Статус документа
 
-Этот документ фиксирует целевую архитектуру и фактическое состояние проекта на
-коммите `3533b8b` (`Implement safe Bluetooth process management`). Если описание
-цели расходится с кодом, текущее расхождение перечислено в разделе
+Этот документ фиксирует целевую архитектуру и фактическое состояние проекта.
+Если описание цели расходится с кодом, текущее расхождение перечислено в разделе
 «Known architectural deviations» и не считается уже реализованной функцией.
 
 Архитектура проекта — **модульный монолит**. Система собирается в один основной
@@ -49,22 +48,27 @@ library намеренно отложен. Для них сохраняются 
 
 ```mermaid
 flowchart TD
-    Entry["main.cpp"] --> App["App — composition root"]
-    App --> CLI["CLI parser / command presentation"]
-    App --> Menu["InteractiveMenu"]
-    App --> SM["SourceManager"]
-    App --> MPD["MpdClient"]
-    App --> BT["BluetoothCtlManager"]
-    App --> PR["PosixProcessRunner"]
-    App --> CFG["ConfigurationLoader"]
-    App --> LOG["Logger"]
-    App --> AO["NullAudioOutput"]
-    App --> SS["SystemStatusService"]
+    Entry["main.cpp"] --> App["Application — composition root"]
+    App --> CTX["AppContext — ownership"]
+    CTX --> CLI["CLI parser / command presentation"]
+    CTX --> Menu["InteractiveMenu"]
+    CTX --> SM["SourceManager"]
+    CTX --> MPD["MpdClient"]
+    CTX --> BT["BluetoothCtlManager"]
+    CTX --> PR["PosixProcessRunner"]
+    CTX --> CFG["Configuration"]
+    CTX --> LOG["Logger"]
+    CTX --> AO["NullAudioOutput"]
+    CTX --> SS["SystemStatusService"]
 
     Menu --> IMP["IMediaPlayer"]
     Menu --> IBT["IBluetoothManager"]
     Menu --> SM
     Menu --> SS
+    CLI --> IMP
+    CLI --> IBT
+    CLI --> SM
+    CLI --> SS
     SS --> IMP
     SS --> IBT
     SS --> SM
@@ -82,9 +86,10 @@ flowchart TD
     PR --> Linux["fork / exec / poll / signals"]
 ```
 
-`App` создаёт объекты и владеет ими в пределах одного запуска. Dependency
-injection framework, service locator и singleton-контейнер не используются.
-Зависимости передаются явно через конструкторы или ссылки.
+`Application` является единственным production composition root. Он создаёт
+объекты, передаёт владение в `AppContext` и связывает их явными constructor
+dependencies. Dependency injection framework, service locator, глобальный
+контейнер и singleton не используются.
 
 ## 4. Логические слои
 
@@ -93,7 +98,7 @@ injection framework, service locator и singleton-контейнер не исп
 Компоненты:
 
 - `CliParser`;
-- CLI-диспетчеризация и форматирование вывода;
+- `Cli` — CLI-диспетчеризация и форматирование вывода;
 - `InteractiveMenu`;
 - будущий GUI.
 
@@ -112,7 +117,8 @@ Presentation не должен вызывать `bluetoothctl`, libmpdclient, AL
 - `SourceManager`;
 - `SystemStatusService`;
 - сценарии координации источников;
-- composition root `App` — только в части создания и связывания объектов.
+- composition root `Application` — только в части создания, связывания,
+  выбора режима и завершения объектов.
 
 Слой оркестрирует модули через интерфейсы. Он не разбирает протоколы MPD или
 BlueZ и не содержит platform-specific process management.
@@ -158,13 +164,25 @@ Composition root вправе знать конкретные классы, по
 
 ## 5. Composition root и жизненный цикл
 
-`App::run()` является текущим composition root. Его разрешённый жизненный цикл:
+`Application::run()` является единственным production composition root.
+`AppContext` владеет типизированной конфигурацией, logger, process runner,
+MPD/Bluetooth adapters, audio output, `SourceManager`, `SystemStatusService`,
+`Cli` и `InteractiveMenu`. Контекст не является service locator: он доступен
+только `Application`, а модули получают конкретные зависимости напрямую.
+
+Жизненный цикл намеренно линейный:
+
+```text
+Created -> Initialized -> Running -> Stopping -> Stopped
+```
+
+Этапы запуска:
 
 1. разобрать общие параметры запуска;
 2. загрузить типизированную конфигурацию;
 3. настроить логирование;
 4. создать process runner и инфраструктурные адаптеры;
-5. создать `SourceManager` и presentation-компоненты;
+5. создать `SourceManager`, `SystemStatusService` и presentation-компоненты;
 6. выбрать CLI или интерактивный режим;
 7. корректно уничтожить все объекты и дочерние процессы.
 
@@ -172,9 +190,15 @@ Composition root вправе знать конкретные классы, по
 телефона, MPD update или тяжёлую диагностику. Все длительные операции должны
 быть явно запрошены и иметь ограничение времени.
 
-`App` не должен разбирать вывод `bluetoothctl`, выполнять MPD-протокол,
-выбирать Bluetooth-устройство или становиться местом для больших command
-switch-блоков. Текущее отклонение от этой границы описано ниже.
+Единый `shutdown()` переводит приложение в `Stopping`, уничтожает `AppContext`
+и затем переводит его в `Stopped`. Порядок владения гарантирует, что
+presentation и application services уничтожаются до infrastructure adapters,
+а `BluetoothCtlManager` завершает принадлежащий ему pairing agent до освобождения
+общего `PosixProcessRunner`.
+
+`Application` не разбирает команды модулей, не форматирует их вывод, не знает
+протокол MPD или формат `bluetoothctl`. Разбор и dispatch команд находятся в
+`Cli`, а Application выбирает только CLI или интерактивный режим.
 
 ## 6. SourceManager
 
@@ -301,11 +325,12 @@ probes. Он возвращает собственный `SystemStatusReport` с
 читает Linux-источники напрямую. CLI и интерактивное меню используют один
 `SystemStatusPresenter`.
 
-Бюджет сбора — менее 200 мс. Production composition использует отдельные
-read-only adapters с лимитами 180 мс для MPD и 100 мс для Bluetooth process
-probe плюс 10 мс grace period. Независимые module probes выполняются параллельно
-в двух владеемых `jthread` и обязательно join-ятся до возврата отчёта.
-Фактическая длительность входит в отчёт и проверяется integration-тестом.
+Бюджет сбора — менее 200 мс. SystemStatus использует те же экземпляры MPD и
+Bluetooth adapters, что CLI, без повторного создания сервисов. Read-only
+`MpdClient::status()` ограничен 180 мс, а единственный `bluetoothctl show` —
+100 мс. Независимые module probes выполняются параллельно в двух владеемых
+`jthread` и обязательно join-ятся до возврата отчёта. Фактическая длительность
+входит в отчёт и проверяется integration-тестом.
 
 ## 13. Модели и ошибки
 
@@ -403,60 +428,58 @@ Pairing, scan, connect/disconnect, удаление устройства, изм
 Ниже перечислены факты текущего кода. Для их исправления нужны отдельные
 подтверждённые задачи.
 
-1. **`App.cpp` совмещает composition root и значительную presentation-логику.**
-   Функции `runMpdCommand`, `runBluetoothCommand` и `runSourceCommand` содержат
-   большие ветвления, форматирование и часть проверки команд. Они принимают
-   конкретные `MpdClient`/`BluetoothCtlManager`, поэтому замена infrastructure
-   затронет CLI-код. Целевое состояние — отдельный presentation/application
-   dispatcher, работающий через интерфейсы, без превращения `App` в God Object.
-
-2. **CLI и InteractiveMenu частично дублируют сценарии и форматирование.** Оба
+1. **CLI и InteractiveMenu частично дублируют сценарии и форматирование.** Оба
    компонента самостоятельно сопоставляют команды с методами модулей. Общего
    набора application use cases пока нет. Выделение такого слоя требует
    отдельной задачи, чтобы не создать преждевременную абстракцию.
 
-3. **Pairing agent обходит `IProcessRunner`.** Вложенный `AgentProcess` внутри
+2. **Pairing agent обходит `IProcessRunner`.** Вложенный `AgentProcess` внутри
    `BluetoothCtlManager` напрямую использует `fork`/`execlp`, process group и
    сигналы. Жизненный цикл ограничен и безопасно завершается, но process
    management продублирован вне общего runner. Поддержка управляемого
    persistent process потребует осознанного расширения контракта ProcessRunner.
 
-4. **Активное Bluetooth-аудиоустройство сейчас не определяется.** Безопасная
+3. **Активное Bluetooth-аудиоустройство сейчас не определяется.** Безопасная
    реализация `status()` выполняет только `bluetoothctl show`, поэтому поле
    `BluetoothStatus::activeAudioDevice` остаётся пустым. Как следствие,
    `releaseAudio()` не может обнаружить и отключить уже подключённый stream, а
    переход Bluetooth → MPD пока не гарантирует реальное освобождение output.
 
-5. **Модель ошибок упрощена.** `Result` содержит только `success` и одну строку,
+4. **Модель ошибок упрощена.** `Result` содержит только `success` и одну строку,
    а некоторые query API передают ошибку через `lastError()`. Категория,
    разделённые user/technical messages и связанный exit code ещё не
    моделируются.
 
-6. **В публичном `MpdClient.hpp` есть лишняя декларация `struct mpd_song`.** Она
+5. **В публичном `MpdClient.hpp` есть лишняя декларация `struct mpd_song`.** Она
    не используется публичным API, но имя C-типа libmpdclient формально попадает
    в публичный infrastructure-заголовок. Доменные интерфейсы и модели при этом
    остаются чистыми.
 
-7. **Logger имеет только четыре уровня и внутреннее глобальное изменяемое
-   состояние.** Реализованы `debug`, `info`, `warning` и `error`; отсутствуют
-   `trace` и `critical`. Статические `minimumLevel` и mutex находятся внутри
-   translation unit, но целевая архитектура предпочитает объект с явным
-   владельцем вместо глобального mutable state.
+6. **Logger имеет только четыре уровня.** Реализованы `debug`, `info`, `warning`
+   и `error`; отсутствуют `trace` и `critical`. Logger теперь имеет явного
+   владельца в `AppContext` и не использует глобальное изменяемое состояние.
 
-8. **Configuration parser поддерживает только используемое подмножество TOML.**
+7. **Configuration parser поддерживает только используемое подмножество TOML.**
    Он корректно обрабатывает текущие простые секции/строки/числа/bool, но не
    является полной TOML-реализацией. Файл реализации физически находится в
    `src/app`, хотя логически относится к infrastructure.
 
-9. **Переключение источника не имеет rollback.** `SourceManager` обновляет
+8. **Переключение источника не имеет rollback.** `SourceManager` обновляет
     `activeSource_` только после полного успеха, но при ошибке посередине уже
     выполненные side effects не компенсируются. Стратегия восстановления требует
     отдельного решения с учётом реального ALSA/BlueALSA поведения.
+
+9. **Graceful shutdown по SIGINT/SIGTERM ещё не интегрирован.** Единый shutdown
+   покрывает все управляемые пути возврата, ошибки и разрушение `Application`,
+   но отдельная signal-aware остановка для будущего запуска через systemd
+   требует цикла событий или другого механизма прерывания синхронного CLI.
 
 ## 19. Карта исходных файлов
 
 ```text
 include/x308/
+  App.hpp                     Application lifecycle and composition root
+  AppContext.hpp              explicit ownership of application services
   Interfaces.hpp              domain interfaces
   Models.hpp                  domain/application models
   SourceManager.hpp           application orchestration
@@ -467,9 +490,11 @@ include/x308/
   ProcessRunner.hpp           process infrastructure contract
   Configuration.hpp           typed configuration contract
   InteractiveMenu.hpp         presentation
+  Cli.hpp                     argument parser and injected CLI dispatcher
   SystemStatusPresenter.hpp   shared CLI/menu status formatting
 src/
-  app/App.cpp                 composition root + current CLI dispatch
+  app/App.cpp                 composition root, lifecycle and shutdown
+  app/AppContext.cpp          owned application context destruction
   app/Configuration.cpp       configuration loading/parsing
   app/Logger.cpp              terminal/journal-friendly logging
   app/SystemStatusService.cpp read-only status aggregation and Linux probes

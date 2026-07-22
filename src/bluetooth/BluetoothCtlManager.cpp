@@ -124,8 +124,9 @@ BluetoothCtlManager::BluetoothCtlManager(BluetoothConfig config,
 BluetoothCtlManager::~BluetoothCtlManager() = default;
 
 ProcessResult BluetoothCtlManager::execute(const std::vector<std::string>& command,
-                                           const std::chrono::seconds timeout) {
-    auto result = processRunner_->run("bluetoothctl", command, timeout + std::chrono::seconds{1});
+                                           const std::chrono::milliseconds timeout,
+                                           const std::chrono::milliseconds processAllowance) {
+    auto result = processRunner_->run("bluetoothctl", command, timeout + processAllowance);
     if (commandFailed(result)) {
         if (result.timedOut) lastError_ = "bluetoothctl timed out";
         else if (!result.standardError.empty()) lastError_ = trim(result.standardError);
@@ -146,7 +147,8 @@ Result BluetoothCtlManager::executeAction(const std::vector<std::string>& comman
 }
 
 BluetoothStatus BluetoothCtlManager::status() {
-    const auto result = execute({"show"});
+    const auto result = execute(
+        {"show"}, std::chrono::milliseconds{90}, std::chrono::milliseconds{10});
     BluetoothStatus status;
     status.serviceAvailable = result.exitCode != 127 && !result.timedOut;
     if (commandFailed(result)) {

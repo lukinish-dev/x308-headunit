@@ -47,6 +47,10 @@ Git-теги и опубликованные версии пока не созд
 - Добавлены unit-тесты агрегации, отсутствующего storage, общего presenter и
   отсутствия изменяющих вызовов, а также безопасный integration-тест с бюджетом
   получения статуса менее 200 мс.
+- Добавлены владеющий `AppContext` и простой жизненный цикл `Application`:
+  Created, Initialized, Running, Stopping и Stopped с единым shutdown.
+- Добавлен инжектируемый `Cli`, который содержит command dispatch и presentation,
+  ранее находившиеся в composition root.
 
 ### Changed
 
@@ -57,6 +61,11 @@ Git-теги и опубликованные версии пока не созд
   timeout и настраиваемый grace period для коротких диагностических probes.
 - Независимые MPD и Bluetooth probes SystemStatus выполняются параллельно во
   владеемых потоках с обязательным join и отдельными жёсткими лимитами.
+- `Application` стал единственной production-точкой создания и связывания
+  Configuration, Logger, ProcessRunner, MPD, Bluetooth, SourceManager,
+  SystemStatus, CLI и InteractiveMenu; дублирующие status adapters удалены.
+- Logger получил явного владельца и больше не хранит глобальное изменяемое
+  состояние.
 
 ### Fixed
 

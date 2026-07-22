@@ -1,3 +1,4 @@
+#include "x308/App.hpp"
 #include "x308/Cli.hpp"
 #include "x308/Configuration.hpp"
 #include "x308/SourceManager.hpp"
@@ -24,10 +25,12 @@ public:
     x308::ProcessResult nextResult;
     std::string executable;
     std::vector<std::string> arguments;
+    std::chrono::milliseconds timeout{0};
     x308::ProcessResult run(std::string_view value, const std::vector<std::string>& args,
-                            std::chrono::milliseconds) override {
+                            std::chrono::milliseconds requestedTimeout) override {
         executable = value;
         arguments = args;
+        timeout = requestedTimeout;
         return nextResult;
     }
 };
@@ -231,6 +234,20 @@ void testBluetoothTimeoutIsReported() {
            "process timeout is converted to module error");
 }
 
+void testBluetoothStatusUsesBoundedReadOnlyProbe() {
+    auto runner = std::make_shared<FakeProcessRunner>();
+    runner->nextResult.exitCode = 0;
+    runner->nextResult.standardOutput =
+        "Controller 54:78:C9:69:E6:1B (public)\n\tPowered: yes\n";
+    x308::BluetoothCtlManager manager{x308::BluetoothConfig{}, runner};
+    const auto status = manager.status();
+    expect(status.adapterAvailable, "bounded Bluetooth status output is parsed");
+    expect(runner->arguments == std::vector<std::string>{"show"},
+           "Bluetooth status remains a single read-only show command");
+    expect(runner->timeout == std::chrono::milliseconds{100},
+           "Bluetooth status process has a 100 ms hard timeout");
+}
+
 void testProcessRunnerCapturesSeparateStreams() {
     x308::PosixProcessRunner runner;
     const auto result = runner.run(X308_PROCESS_FIXTURE_PATH, {"output"}, std::chrono::seconds{1});
@@ -360,6 +377,45 @@ void testSystemStatusCollectsModuleStatusesConcurrently() {
            "independent module status probes run concurrently");
 }
 
+void testApplicationLifecycleAndComposition() {
+    std::istringstream input;
+    std::ostringstream output;
+    std::ostringstream error;
+    x308::Application application{input, output, error};
+    expect(application.state() == x308::ApplicationState::created,
+           "application starts in Created state");
+
+    const char* arguments[] = {"x308-headunit", "source", "status"};
+    const auto result = application.run(3, arguments);
+    expect(result == 0, "composed CLI executes through Application");
+    expect(output.str().find("Активный источник") != std::string::npos,
+           "Application selects CLI mode with injected services");
+    expect(application.state() == x308::ApplicationState::stopped,
+           "application reaches Stopped after unified shutdown");
+
+    const auto repeatedResult = application.run(3, arguments);
+    expect(repeatedResult == 2 && error.str().find("уже был запущен") != std::string::npos,
+           "stopped Application instance cannot be started twice");
+}
+
+void testCliDispatchUsesInjectedServices() {
+    std::vector<std::string> calls;
+    FakeMediaPlayer mpd{calls};
+    FakeBluetooth bluetooth{calls};
+    FakeAudioOutput audioOutput{calls};
+    x308::SourceManager sourceManager{mpd, bluetooth, audioOutput};
+    x308::SystemStatusService systemStatus{
+        mpd, bluetooth, sourceManager, "/tmp", "test", "Test"};
+    std::ostringstream output;
+    std::ostringstream error;
+    x308::Cli cli{mpd, bluetooth, sourceManager, systemStatus, output, error};
+
+    const auto result = cli.run({"mpd", "pause"});
+    expect(result == 0 && calls == std::vector<std::string>{"mpd.pause"},
+           "CLI dispatches through the injected media player");
+    expect(error.str().empty(), "successful injected CLI command has no error output");
+}
+
 }  // namespace
 
 int main() {
@@ -375,6 +431,7 @@ int main() {
     testBluetoothUsesSeparatedArgumentsAndRejectsInvalidMac();
     testFirstAvailableTrustedDevice();
     testBluetoothTimeoutIsReported();
+    testBluetoothStatusUsesBoundedReadOnlyProbe();
     testProcessRunnerCapturesSeparateStreams();
     testProcessRunnerKillsProcessTreeAtDeadline();
     testProcessRunnerCapsRequestedTimeout();
@@ -382,6 +439,8 @@ int main() {
     testSystemStatusHandlesMissingStorage();
     testInteractiveMenuUsesSystemStatusService();
     testSystemStatusCollectsModuleStatusesConcurrently();
+    testApplicationLifecycleAndComposition();
+    testCliDispatchUsesInjectedServices();
     if (failures == 0) {
         std::cout << "All unit tests passed\n";
     }
