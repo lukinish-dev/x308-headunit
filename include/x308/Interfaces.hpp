@@ -51,9 +51,18 @@ public:
     [[nodiscard]] virtual Result remove(std::string_view mac) = 0;
     [[nodiscard]] virtual Result setPairingMode(bool enabled) = 0;
     [[nodiscard]] virtual Result autoConnect() = 0;
-    [[nodiscard]] virtual Result activateAudio() = 0;
-    [[nodiscard]] virtual Result releaseAudio() = 0;
     [[nodiscard]] virtual std::string lastError() const = 0;
+};
+
+class IBluetoothMediaController {
+public:
+    virtual ~IBluetoothMediaController() = default;
+    [[nodiscard]] virtual BluetoothMediaStatus status() = 0;
+    [[nodiscard]] virtual Result play() = 0;
+    [[nodiscard]] virtual Result pause() = 0;
+    [[nodiscard]] virtual Result togglePause() = 0;
+    [[nodiscard]] virtual Result next() = 0;
+    [[nodiscard]] virtual Result previous() = 0;
 };
 
 class IAudioOutput {

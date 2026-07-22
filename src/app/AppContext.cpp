@@ -1,9 +1,10 @@
 #include "x308/AppContext.hpp"
 
 #include "x308/BluetoothCtlManager.hpp"
+#include "x308/BluezDbusMediaController.hpp"
 #include "x308/Cli.hpp"
 #include "x308/Configuration.hpp"
-#include "x308/HardwareStubs.hpp"
+#include "x308/LinuxAudioOutputController.hpp"
 #include "x308/InteractiveMenu.hpp"
 #include "x308/Logger.hpp"
 #include "x308/MpdClient.hpp"

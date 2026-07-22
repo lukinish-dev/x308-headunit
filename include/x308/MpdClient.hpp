@@ -36,10 +36,11 @@ public:
                                                  const char* artist, const char* album);
 
 private:
+    [[nodiscard]] Result setAudioOutputEnabled(bool enabled);
+
     MpdConfig config_;
     unsigned timeoutMilliseconds_;
     std::string lastError_;
 };
 
 }  // namespace x308
-

@@ -6,7 +6,7 @@ namespace x308 {
 
 class SourceManager {
 public:
-    SourceManager(IMediaPlayer& mpd, IBluetoothManager& bluetooth, IAudioOutput& audioOutput,
+    SourceManager(IMediaPlayer& mpd, IAudioOutput& audioOutput,
                   AudioSource initialSource = AudioSource::mpd);
 
     [[nodiscard]] Result setSource(AudioSource source);
@@ -15,10 +15,8 @@ public:
 
 private:
     IMediaPlayer& mpd_;
-    IBluetoothManager& bluetooth_;
     IAudioOutput& audioOutput_;
     AudioSource activeSource_;
 };
 
 }  // namespace x308
-

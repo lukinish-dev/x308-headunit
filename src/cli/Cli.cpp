@@ -6,6 +6,8 @@
 #include "x308/SystemStatusService.hpp"
 
 #include <ostream>
+#include <iomanip>
+#include <sstream>
 #include <string_view>
 
 namespace x308 {
@@ -58,6 +60,35 @@ void printBluetoothDevice(const BluetoothDevice& device, std::ostream& output) {
            << "Доступно сейчас: " << (device.available ? "да" : "нет") << "\n\n";
 }
 
+std::string mediaTime(const std::uint64_t milliseconds) {
+    const auto totalSeconds = milliseconds / 1000U;
+    std::ostringstream rendered;
+    rendered << totalSeconds / 60U << ':' << std::setw(2) << std::setfill('0')
+             << totalSeconds % 60U;
+    return rendered.str();
+}
+
+void printBluetoothMedia(const BluetoothMediaStatus& status, std::ostream& output) {
+    output << "AVRCP-плеер: доступен\n"
+           << "Устройство: " << (status.deviceName.empty() ? "—" : status.deviceName) << '\n'
+           << "MAC: " << (status.deviceAddress.empty() ? "—" : status.deviceAddress) << '\n'
+           << "Состояние: " << stateName(status.state) << '\n';
+    if (status.currentTrack.has_value()) {
+        const auto& track = *status.currentTrack;
+        output << "Название: " << (track.title.empty() ? "—" : track.title) << '\n'
+               << "Исполнитель: " << (track.artist.empty() ? "—" : track.artist) << '\n'
+               << "Альбом: " << (track.album.empty() ? "—" : track.album) << '\n';
+    } else {
+        output << "Метаданные трека отсутствуют.\n";
+    }
+    if (status.durationMilliseconds.has_value()) {
+        output << "Длительность: " << mediaTime(*status.durationMilliseconds) << '\n';
+    }
+    if (status.positionMilliseconds.has_value()) {
+        output << "Позиция: " << mediaTime(*status.positionMilliseconds) << '\n';
+    }
+}
+
 }  // namespace
 
 CliArguments CliParser::parse(const int argc, const char* const* argv) {
@@ -91,14 +122,17 @@ std::string CliParser::helpText() {
         "  status         Показать состояние системы\n"
         "  source ...     Управление источником\n"
         "  mpd ...        Управление MPD\n"
-        "  bluetooth ...  Управление Bluetooth\n";
+        "  bluetooth ...  Устройства Bluetooth и AVRCP\n"
+        "    current | play | pause | toggle | next | previous\n";
 }
 
 Cli::Cli(IMediaPlayer& mediaPlayer, IBluetoothManager& bluetooth,
+         IBluetoothMediaController& bluetoothMedia,
          SourceManager& sourceManager, SystemStatusService& systemStatus,
          std::ostream& output, std::ostream& error)
     : mediaPlayer_(mediaPlayer),
       bluetooth_(bluetooth),
+      bluetoothMedia_(bluetoothMedia),
       sourceManager_(sourceManager),
       systemStatus_(systemStatus),
       output_(output),
@@ -197,6 +231,30 @@ int Cli::run(const std::vector<std::string>& command) const {
             return 2;
         }
         const auto& action = command[1];
+        if (action == "current" && command.size() == 2) {
+            const auto media = bluetoothMedia_.status();
+            if (!media.available) {
+                error_ << "Bluetooth-медиаплеер недоступен: " << media.error << '\n';
+                return 1;
+            }
+            printBluetoothMedia(media, output_);
+            return 0;
+        }
+        if (command.size() == 2 && action == "play") {
+            return printResult(bluetoothMedia_.play(), output_, error_);
+        }
+        if (command.size() == 2 && action == "pause") {
+            return printResult(bluetoothMedia_.pause(), output_, error_);
+        }
+        if (command.size() == 2 && action == "toggle") {
+            return printResult(bluetoothMedia_.togglePause(), output_, error_);
+        }
+        if (command.size() == 2 && action == "next") {
+            return printResult(bluetoothMedia_.next(), output_, error_);
+        }
+        if (command.size() == 2 && action == "previous") {
+            return printResult(bluetoothMedia_.previous(), output_, error_);
+        }
         if (action == "status" && command.size() == 2) {
             const auto status = bluetooth_.status();
             output_ << "Служба Bluetooth: "

@@ -31,9 +31,11 @@ void showResult(std::ostream& output, const Result& result) {
 }  // namespace
 
 InteractiveMenu::InteractiveMenu(IMediaPlayer* mediaPlayer, IBluetoothManager* bluetooth,
+                                 IBluetoothMediaController* bluetoothMedia,
                                  SourceManager* sourceManager, SystemStatusService* systemStatus)
     : mediaPlayer_(mediaPlayer),
       bluetooth_(bluetooth),
+      bluetoothMedia_(bluetoothMedia),
       sourceManager_(sourceManager),
       systemStatus_(systemStatus) {}
 
@@ -89,7 +91,9 @@ int InteractiveMenu::runBluetoothMenu(std::istream& input, std::ostream& output)
                << "7. Сопряжённые\n8. Доверенные\n9. Сопрячь\n10. Доверять\n"
                << "11. Не доверять\n12. Подключить\n13. Отключить\n14. Удалить\n"
                << "15. Режим сопряжения: вкл\n16. Режим сопряжения: выкл\n"
-               << "17. Автоподключение\n0. Назад\n\n> " << std::flush;
+               << "17. Автоподключение\n18. Текущий Bluetooth-трек\n"
+               << "19. Play\n20. Pause\n21. Play/Pause\n22. Следующий\n"
+               << "23. Предыдущий\n0. Назад\n\n> " << std::flush;
         if (!std::getline(input, selection) || selection == "0") return 0;
         if (selection == "1") {
             const auto status = bluetooth_->status();
@@ -114,6 +118,33 @@ int InteractiveMenu::runBluetoothMenu(std::istream& input, std::ostream& output)
         } else if (selection == "15") showResult(output, bluetooth_->setPairingMode(true));
         else if (selection == "16") showResult(output, bluetooth_->setPairingMode(false));
         else if (selection == "17") showResult(output, bluetooth_->autoConnect());
+        else if (selection == "18" && bluetoothMedia_ != nullptr) {
+            const auto media = bluetoothMedia_->status();
+            if (!media.available) {
+                output << "Bluetooth-медиаплеер недоступен: " << media.error << '\n';
+            } else {
+                output << "Состояние: " << playbackName(media.state) << '\n'
+                       << "Устройство: " << (media.deviceName.empty() ? "—" : media.deviceName)
+                       << '\n';
+                if (media.currentTrack.has_value()) {
+                    output << "Трек: "
+                           << (media.currentTrack->title.empty() ? "—" : media.currentTrack->title)
+                           << "\nИсполнитель: "
+                           << (media.currentTrack->artist.empty() ? "—" : media.currentTrack->artist)
+                           << '\n';
+                }
+            }
+        } else if (selection == "19" && bluetoothMedia_ != nullptr) {
+            showResult(output, bluetoothMedia_->play());
+        } else if (selection == "20" && bluetoothMedia_ != nullptr) {
+            showResult(output, bluetoothMedia_->pause());
+        } else if (selection == "21" && bluetoothMedia_ != nullptr) {
+            showResult(output, bluetoothMedia_->togglePause());
+        } else if (selection == "22" && bluetoothMedia_ != nullptr) {
+            showResult(output, bluetoothMedia_->next());
+        } else if (selection == "23" && bluetoothMedia_ != nullptr) {
+            showResult(output, bluetoothMedia_->previous());
+        }
         else if (selection == "9" || selection == "10" || selection == "11" ||
                  selection == "12" || selection == "13" || selection == "14") {
             const auto mac = promptMac();

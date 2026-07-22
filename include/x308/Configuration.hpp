@@ -17,18 +17,25 @@ struct MpdConfig {
     std::string host{"localhost"};
     unsigned port{6600};
     std::filesystem::path musicDirectory{"/mnt/music"};
+    std::string audioOutputName{"ES8316"};
 };
 
 struct BluetoothConfig {
     std::string adapter{"hci0"};
     std::string deviceName{"Jaguar XJR"};
     bool autoConnect{true};
+    int autoConnectTimeoutSeconds{10};
+    int mediaDbusTimeoutMilliseconds{800};
     int discoverableTimeoutSeconds{120};
     bool autoAcceptPairing{true};
 };
 
 struct AudioConfig {
     std::string defaultSource{"mpd"};
+    std::string bluetoothBackend{"bluealsa"};
+    std::string alsaPcm{"plughw:CARD=rockchipes8316,DEV=0"};
+    std::string bluealsaAplayService{"bluealsa-aplay.service"};
+    int commandTimeoutMilliseconds{2000};
 };
 
 struct LoggingConfig {
@@ -57,4 +64,3 @@ public:
 };
 
 }  // namespace x308
-

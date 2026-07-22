@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -63,5 +64,18 @@ struct BluetoothStatus {
     std::string error;
 };
 
-}  // namespace x308
+struct BluetoothMediaStatus {
+    bool available{false};
+    bool connected{false};
+    PlaybackState state{PlaybackState::unknown};
+    std::optional<Track> currentTrack;
+    std::optional<std::uint64_t> durationMilliseconds;
+    std::optional<std::uint64_t> positionMilliseconds;
+    std::string deviceAddress;
+    std::string deviceName;
+    std::string devicePath;
+    std::string playerPath;
+    std::string error;
+};
 
+}  // namespace x308

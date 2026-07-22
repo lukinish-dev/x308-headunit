@@ -12,9 +12,9 @@ Result withContext(const Result& result, const std::string_view context) {
 
 }  // namespace
 
-SourceManager::SourceManager(IMediaPlayer& mpd, IBluetoothManager& bluetooth,
-                             IAudioOutput& audioOutput, const AudioSource initialSource)
-    : mpd_(mpd), bluetooth_(bluetooth), audioOutput_(audioOutput), activeSource_(initialSource) {}
+SourceManager::SourceManager(IMediaPlayer& mpd, IAudioOutput& audioOutput,
+                             const AudioSource initialSource)
+    : mpd_(mpd), audioOutput_(audioOutput), activeSource_(initialSource) {}
 
 Result SourceManager::setSource(const AudioSource source) {
     if (source == AudioSource::carPlay) {
@@ -25,14 +25,17 @@ Result SourceManager::setSource(const AudioSource source) {
     }
 
     if (source == AudioSource::mpd) {
-        if (const auto result = bluetooth_.releaseAudio(); !result.success) {
-            return withContext(result, "Cannot release Bluetooth audio");
-        }
         if (const auto result = audioOutput_.selectSource(source); !result.success) {
-            return withContext(result, "Cannot select MPD output");
+            return withContext(result, "Cannot release Bluetooth audio receiver");
         }
         if (const auto result = mpd_.activateAudio(); !result.success) {
-            return withContext(result, "Cannot activate MPD audio");
+            const auto rollback = audioOutput_.selectSource(AudioSource::bluetooth);
+            if (!rollback.success) {
+                return Result::error("Partial source switch failure: MPD output activation failed: " +
+                                     result.message + "; Bluetooth audio rollback failed: " +
+                                     rollback.message);
+            }
+            return withContext(result, "Cannot activate MPD audio; Bluetooth audio restored");
         }
     } else {
         if (const auto result = mpd_.pause(); !result.success) {
@@ -42,10 +45,13 @@ Result SourceManager::setSource(const AudioSource source) {
             return withContext(result, "Cannot release MPD audio");
         }
         if (const auto result = audioOutput_.selectSource(source); !result.success) {
-            return withContext(result, "Cannot select Bluetooth output");
-        }
-        if (const auto result = bluetooth_.activateAudio(); !result.success) {
-            return withContext(result, "Cannot activate Bluetooth audio");
+            const auto rollback = mpd_.activateAudio();
+            if (!rollback.success) {
+                return Result::error("Partial source switch failure: Bluetooth audio activation failed: " +
+                                     result.message + "; MPD output rollback failed: " +
+                                     rollback.message);
+            }
+            return withContext(result, "Cannot activate Bluetooth audio; MPD output restored");
         }
     }
 
@@ -67,4 +73,3 @@ std::string_view SourceManager::name(const AudioSource source) noexcept {
 }
 
 }  // namespace x308
-

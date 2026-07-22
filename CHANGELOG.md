@@ -57,6 +57,20 @@ Git-теги и опубликованные версии пока не созд
   Bluetooth devices, а также руководство `docs/MANUAL_TESTS.md`.
 - Добавлен README со сборкой, runtime-командами, обнаруженным BlueALSA backend и
   честными ограничениями A2DP/AVRCP/SourceManager.
+- Добавлены `BluetoothMediaStatus`, `IBluetoothMediaController` и отдельный
+  `BluezDbusMediaController` для bounded ObjectManager discovery, свойств
+  `MediaControl1`/`MediaPlayer1`, AVRCP playback и track metadata.
+- Добавлены команды `bluetooth current`, `play`, `pause`, `toggle`, `next` и
+  `previous` с русскоязычным выводом и соответствующие пункты меню.
+- Добавлен `LinuxAudioOutputController`, управляющий готовностью
+  `bluealsa-aplay.service` и фактическим ALSA PCM без shell-команд.
+- Добавлен bounded startup auto-connect trusted Bluetooth devices; его ошибка
+  логируется и не блокирует запуск приложения.
+- Добавлены unit-тесты D-Bus property/metadata parsing, отсутствующего player,
+  AVRCP dispatch, startup auto-connect, source ordering/rollback и timeout, а
+  также безопасная read-only D-Bus integration-проверка.
+- Добавлен фактический аудит BlueZ/BlueALSA/PipeWire/ALSA в
+  `docs/BLUETOOTH_RUNTIME.md` и полный ручной iPhone A2DP/AVRCP сценарий.
 
 ### Changed
 
@@ -75,6 +89,13 @@ Git-теги и опубликованные версии пока не созд
 - Интерактивные MPD/Bluetooth menus теперь покрывают toggle, random, repeat,
   add-folder и отдельные paired/trusted lists через существующие сервисы.
 - Пользовательские CLI statuses и успешные результаты выводятся на русском.
+- `MpdClient::activateAudio()` и `releaseAudio()` теперь включают и отключают
+  настроенный MPD output через libmpdclient вместо stop/status-заглушек.
+- `SourceManager` больше не использует device-management Bluetooth interface
+  для управления аудио; production переключение координирует MPD output и
+  Linux BlueALSA receiver с компенсацией доступных шагов.
+- `BluetoothCtlManager` ограничивает auto-connect одновременно числом попыток,
+  timeout каждой команды и общим startup deadline.
 
 ### Fixed
 
@@ -89,5 +110,8 @@ Git-теги и опубликованные версии пока не созд
 - Read-only MPD status восстанавливается после подтверждённого немедленного
   transient timeout одной ограниченной повторной попыткой, не повторяя
   полноценный timeout недоступного сервера.
+- Ошибка переключения источника больше не меняет логического владельца; rollback
+  восстанавливает предыдущий output, а невозможность восстановления явно
+  возвращается как partial failure.
 
 [Unreleased]: https://github.com/lukinish-dev/x308-headunit/commits/main

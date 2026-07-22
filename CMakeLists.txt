@@ -26,6 +26,7 @@ endif()
 add_library(x308_core
     src/app/App.cpp
     src/app/AppContext.cpp
+    src/app/BluetoothStartupConnector.cpp
     src/app/Configuration.cpp
     src/app/Logger.cpp
     src/app/SystemStatusService.cpp
@@ -34,7 +35,9 @@ add_library(x308_core
     src/cli/SystemStatusPresenter.cpp
     src/mpd/MpdClient.cpp
     src/bluetooth/BluetoothCtlManager.cpp
+    src/bluetooth/BluezDbusMediaController.cpp
     src/system/ProcessRunner.cpp
+    src/system/LinuxAudioOutputController.cpp
     src/source/SourceManager.cpp
     src/system/HardwareStubs.cpp
 )
@@ -100,6 +103,10 @@ if(BUILD_TESTING)
             COMMAND x308_integration_tests bluetooth-devices)
         set_tests_properties(bluetooth_devices_integration_test
             PROPERTIES LABELS "integration" TIMEOUT 6)
+        add_test(NAME bluetooth_media_integration_test
+            COMMAND x308_integration_tests bluetooth-media)
+        set_tests_properties(bluetooth_media_integration_test
+            PROPERTIES LABELS "integration" TIMEOUT 3)
         add_test(NAME system_status_integration_test COMMAND x308_integration_tests status)
         set_tests_properties(system_status_integration_test PROPERTIES LABELS "integration" TIMEOUT 1)
     endif()

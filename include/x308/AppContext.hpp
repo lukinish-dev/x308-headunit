@@ -5,12 +5,13 @@
 namespace x308 {
 
 class BluetoothCtlManager;
+class BluezDbusMediaController;
 class Cli;
 struct Configuration;
 class InteractiveMenu;
 class Logger;
 class MpdClient;
-class NullAudioOutput;
+class LinuxAudioOutputController;
 class PosixProcessRunner;
 class SourceManager;
 class SystemStatusService;
@@ -27,7 +28,8 @@ struct AppContext {
     std::shared_ptr<PosixProcessRunner> processRunner;
     std::unique_ptr<MpdClient> mpd;
     std::unique_ptr<BluetoothCtlManager> bluetooth;
-    std::unique_ptr<NullAudioOutput> audioOutput;
+    std::unique_ptr<BluezDbusMediaController> bluetoothMedia;
+    std::unique_ptr<LinuxAudioOutputController> audioOutput;
     std::unique_ptr<SourceManager> sourceManager;
     std::unique_ptr<SystemStatusService> systemStatus;
     std::unique_ptr<Cli> cli;

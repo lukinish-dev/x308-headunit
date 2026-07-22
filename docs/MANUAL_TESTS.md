@@ -13,6 +13,35 @@
    является целью проверки.
 4. Все диагностические команды ограничивайте, например:
    `timeout --signal=TERM --kill-after=1s 5s <команда>`.
+5. Проверьте `mpc outputs`: output `ES8316` должен существовать, а
+   `audio.alsa_pcm` должен совпадать с PCM в `bluealsa-aplay.service`.
+6. Пользователь приложения должен иметь право запускать/останавливать
+   `bluealsa-aplay.service`. Приложение не использует скрытый `sudo`.
+
+## Полный обязательный сценарий iPhone
+
+Выполните весь сценарий в указанном порядке и запишите результат каждого шага:
+
+1. Сопрягите iPhone с `Jaguar XJR` через интерактивный pairing mode.
+2. Выполните `bluetooth trust <MAC>` и убедитесь, что устройство trusted.
+3. Убедитесь, что `bluetooth.auto_connect = true`, закройте и снова запустите
+   приложение. Startup не должен зависнуть; iPhone должен подключиться
+   автоматически либо должна появиться bounded warning при недоступном телефоне.
+4. Запустите музыку на iPhone и выберите `source set bluetooth` в одном
+   долгоживущем интерактивном процессе.
+5. Убедитесь на слух, что A2DP audio идёт через ES8316, и выполните
+   `bluetooth current`: title/artist/album/status должны соответствовать iPhone.
+6. По очереди проверьте `bluetooth pause`, `play`, `next`, `previous` и
+   `toggle`; после каждого шага сравните состояние и трек на iPhone.
+7. В том же процессе выберите MPD. Убедитесь, что `bluealsa-aplay.service`
+   освобождён, MPD output `ES8316` включён и MPD звучит.
+8. Проверьте MPD `play`, `pause`, `next`, `previous`.
+9. Переключитесь обратно на Bluetooth. Убедитесь, что MPD поставлен на паузу,
+   его output отключён, `bluealsa-aplay.service` active, звук iPhone и metadata
+   восстановились.
+10. Если любой шаг неуспешен, зафиксируйте сообщение partial failure,
+    `source status`, `mpc outputs`, `systemctl status bluealsa-aplay` и
+    `wpctl status`. Не считайте сценарий пройденным при конкуренции двух backend.
 
 ## 1. Pairing телефона
 
@@ -53,9 +82,10 @@ timeout --signal=TERM --kill-after=1s 5s bluetoothctl info AA:BB:CC:DD:EE:FF
 3. Выполните `./build/x308-headunit bluetooth auto-connect`.
 
 Ожидается: приложение пробует trusted devices в порядке списка, не более трёх,
-с жёстким timeout пять секунд на попытку и подключает первое доступное. Команда
-не повторяется бесконечно. Автоматический вызов при старте приложения сейчас не
-включён.
+с жёстким timeout до пяти секунд на попытку, общим startup deadline и подключает
+первое доступное. Команда не повторяется бесконечно. При
+`bluetooth.auto_connect = true` тот же bounded сценарий выполняется на старте;
+его ошибка не должна препятствовать открытию CLI/меню.
 
 ## 5. A2DP audio
 
@@ -78,11 +108,11 @@ busctl tree org.bluez
 busctl introspect org.bluez /org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF
 ```
 
-Проверьте, появился ли `org.bluez.MediaPlayer1`, его `Status` и `Track`, а также
-реакцию телефона на Play/Pause/Next/Previous доступным системным D-Bus client.
-Текущее приложение эти методы не вызывает: полноценная проверка управления и
-metadata является следующим BlueZ D-Bus этапом, а не возможностью bluetoothctl
-backend.
+Проверьте, появился ли `org.bluez.MediaPlayer1`, затем выполните
+`bluetooth current`, `play`, `pause`, `toggle`, `next`, `previous`. Ожидается:
+приложение показывает `Status`, `Track`, duration/position при наличии и iPhone
+реагирует на каждый метод. При отсутствии player приложение должно вернуть
+понятное сообщение, а не зависнуть.
 
 ## 7. Переключение MPD → Bluetooth
 
@@ -91,29 +121,30 @@ backend.
 3. Подключите телефон и выберите источник Bluetooth.
 4. Проверьте, что MPD перешёл в pause/stop и телефон слышен через ES8316.
 
-Ожидается: active source изменяется только после успешных шагов. Если Bluetooth
-не подключается, active source остаётся MPD.
+Ожидается: MPD поставлен на паузу, output `ES8316` отключён, затем
+`bluealsa-aplay.service` запущен и active source изменяется только после
+успешной readiness-проверки. При ошибке MPD output восстанавливается либо
+возвращается явный partial failure.
 
 ## 8. Переключение Bluetooth → MPD
 
 1. При активном A2DP stream выберите MPD в том же интерактивном процессе.
 2. Проверьте `mpc status`, `bluealsa-aplay --list-pcms` и ALSA/journal errors.
 
-Текущее ожидаемое ограничение: bluetoothctl status не определяет активный A2DP
-stream, поэтому приложение пока не может гарантировать освобождение BlueALSA
-PCM. Не считайте тест пройденным, если MPD не открыл ES8316 или оба backend
-конкурируют за устройство.
+Ожидается: `bluealsa-aplay.service` остановлен и перестал удерживать PCM, затем
+MPD output `ES8316` включён. При ошибке Bluetooth receiver восстанавливается
+либо возвращается явный partial failure. Не считайте тест пройденным, если MPD
+не открыл ES8316 или оба backend конкурируют за устройство.
 
 ## 9. Проверка после reboot
 
 1. Перезагрузите Rock Pi вручную.
 2. Проверьте services `mpd`, `bluetooth`, `bluealsa`, `bluealsa-aplay`.
 3. Проверьте paired/trusted list.
-4. Выполните ручной `bluetooth auto-connect` и A2DP test.
+4. Запустите приложение и проверьте автоматический bounded connect и A2DP test.
 
-Ожидается: pairing/trust сохраняются. Само приложение пока не вызывает
-auto-connect при старте; возможное системное автоподключение BlueZ фиксируйте
-отдельно.
+Ожидается: pairing/trust сохраняются, приложение автоматически подключает
+trusted iPhone, а отсутствующий телефон не препятствует запуску.
 
 ## 10. Итог и диагностика
 

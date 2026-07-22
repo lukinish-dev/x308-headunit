@@ -65,18 +65,32 @@ void apply(Configuration& config, const std::string& section, const std::string&
         config.mpd.port = static_cast<unsigned>(port);
     } else if (section == "mpd" && key == "music_directory") {
         config.mpd.musicDirectory = parseString(value, line);
+    } else if (section == "mpd" && key == "audio_output_name") {
+        config.mpd.audioOutputName = parseString(value, line);
     } else if (section == "bluetooth" && key == "adapter") {
         config.bluetooth.adapter = parseString(value, line);
     } else if (section == "bluetooth" && key == "device_name") {
         config.bluetooth.deviceName = parseString(value, line);
     } else if (section == "bluetooth" && key == "auto_connect") {
         config.bluetooth.autoConnect = parseBool(value, line);
+    } else if (section == "bluetooth" && key == "auto_connect_timeout_seconds") {
+        config.bluetooth.autoConnectTimeoutSeconds = parseInt(value, line);
+    } else if (section == "bluetooth" && key == "media_dbus_timeout_ms") {
+        config.bluetooth.mediaDbusTimeoutMilliseconds = parseInt(value, line);
     } else if (section == "bluetooth" && key == "discoverable_timeout_seconds") {
         config.bluetooth.discoverableTimeoutSeconds = parseInt(value, line);
     } else if (section == "bluetooth" && key == "auto_accept_pairing") {
         config.bluetooth.autoAcceptPairing = parseBool(value, line);
     } else if (section == "audio" && key == "default_source") {
         config.audio.defaultSource = parseString(value, line);
+    } else if (section == "audio" && key == "bluetooth_backend") {
+        config.audio.bluetoothBackend = parseString(value, line);
+    } else if (section == "audio" && key == "alsa_pcm") {
+        config.audio.alsaPcm = parseString(value, line);
+    } else if (section == "audio" && key == "bluealsa_aplay_service") {
+        config.audio.bluealsaAplayService = parseString(value, line);
+    } else if (section == "audio" && key == "command_timeout_ms") {
+        config.audio.commandTimeoutMilliseconds = parseInt(value, line);
     } else if (section == "logging" && key == "level") {
         config.logging.level = parseString(value, line);
     }
@@ -137,11 +151,13 @@ Configuration ConfigurationLoader::parse(std::istream& input) {
         apply(config, section, trim(line.substr(0, equals)), trim(line.substr(equals + 1)), lineNumber);
     }
     if (config.application.startupTimeoutSeconds < 1 ||
-        config.bluetooth.discoverableTimeoutSeconds < 1) {
+        config.bluetooth.autoConnectTimeoutSeconds < 1 ||
+        config.bluetooth.mediaDbusTimeoutMilliseconds < 1 ||
+        config.bluetooth.discoverableTimeoutSeconds < 1 ||
+        config.audio.commandTimeoutMilliseconds < 1) {
         throw ConfigurationError("Timeout values must be positive");
     }
     return config;
 }
 
 }  // namespace x308
-

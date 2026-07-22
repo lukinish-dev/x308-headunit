@@ -2,9 +2,11 @@
 
 #include "x308/AppContext.hpp"
 #include "x308/BluetoothCtlManager.hpp"
+#include "x308/BluetoothStartupConnector.hpp"
+#include "x308/BluezDbusMediaController.hpp"
 #include "x308/Cli.hpp"
 #include "x308/Configuration.hpp"
-#include "x308/HardwareStubs.hpp"
+#include "x308/LinuxAudioOutputController.hpp"
 #include "x308/InteractiveMenu.hpp"
 #include "x308/Logger.hpp"
 #include "x308/MpdClient.hpp"
@@ -77,22 +79,40 @@ int Application::run(const int argc, const char* const* argv) {
         context->mpd = std::make_unique<MpdClient>(configuration.mpd, timeout);
         context->bluetooth = std::make_unique<BluetoothCtlManager>(
             configuration.bluetooth, context->processRunner, context->logger.get());
-        context->audioOutput = std::make_unique<NullAudioOutput>();
+        context->bluetoothMedia = std::make_unique<BluezDbusMediaController>(
+            context->processRunner,
+            std::chrono::milliseconds{configuration.bluetooth.mediaDbusTimeoutMilliseconds});
+        context->audioOutput = std::make_unique<LinuxAudioOutputController>(
+            configuration.audio, context->processRunner);
 
         const auto initialSource = configuration.audio.defaultSource == "bluetooth"
             ? AudioSource::bluetooth : AudioSource::mpd;
         context->sourceManager = std::make_unique<SourceManager>(
-            *context->mpd, *context->bluetooth, *context->audioOutput, initialSource);
+            *context->mpd, *context->audioOutput, initialSource);
         context->systemStatus = std::make_unique<SystemStatusService>(
             *context->mpd, *context->bluetooth, *context->sourceManager,
             configuration.mpd.musicDirectory, X308_VERSION, X308_BUILD_TYPE,
             applicationStartedAt);
         context->cli = std::make_unique<Cli>(
-            *context->mpd, *context->bluetooth, *context->sourceManager,
+            *context->mpd, *context->bluetooth, *context->bluetoothMedia,
+            *context->sourceManager,
             *context->systemStatus, output_, error_);
         context->interactiveMenu = std::make_unique<InteractiveMenu>(
-            context->mpd.get(), context->bluetooth.get(), context->sourceManager.get(),
+            context->mpd.get(), context->bluetooth.get(), context->bluetoothMedia.get(),
+            context->sourceManager.get(),
             context->systemStatus.get());
+
+        const auto autoConnect = BluetoothStartupConnector::run(
+            configuration.bluetooth.autoConnect, *context->bluetooth);
+        if (!autoConnect.success) {
+            context->logger->log(LogLevel::warning,
+                                 "Bluetooth startup auto-connect failed: " +
+                                     autoConnect.message);
+        } else if (configuration.bluetooth.autoConnect) {
+            context->logger->log(LogLevel::info,
+                                 "Bluetooth startup auto-connect completed: " +
+                                     autoConnect.message);
+        }
 
         context_ = std::move(context);
         state_ = ApplicationState::running;

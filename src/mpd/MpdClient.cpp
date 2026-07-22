@@ -1,6 +1,7 @@
 #include "x308/MpdClient.hpp"
 
 #include <mpd/client.h>
+#include <mpd/output.h>
 
 #include <algorithm>
 #include <chrono>
@@ -15,6 +16,7 @@ using ConnectionPtr = std::unique_ptr<mpd_connection, decltype(&mpd_connection_f
 using StatusPtr = std::unique_ptr<mpd_status, decltype(&mpd_status_free)>;
 using SongPtr = std::unique_ptr<mpd_song, decltype(&mpd_song_free)>;
 using EntityPtr = std::unique_ptr<mpd_entity, decltype(&mpd_entity_free)>;
+using OutputPtr = std::unique_ptr<mpd_output, decltype(&mpd_output_free)>;
 
 ConnectionPtr connect(const MpdConfig& config, const unsigned timeout, std::string& error) {
     ConnectionPtr connection{
@@ -211,13 +213,51 @@ Result MpdClient::update() {
 }
 
 Result MpdClient::activateAudio() {
-    const auto currentStatus = status();
-    return currentStatus.available ? Result::ok("MPD audio is available")
-                                   : Result::error(currentStatus.error);
+    return setAudioOutputEnabled(true);
 }
 
 Result MpdClient::releaseAudio() {
-    return stop();
+    return setAudioOutputEnabled(false);
+}
+
+Result MpdClient::setAudioOutputEnabled(const bool enabled) {
+    auto connection = connect(config_, timeoutMilliseconds_, lastError_);
+    if (!connection) return Result::error(lastError_);
+    if (!mpd_send_outputs(connection.get())) {
+        lastError_ = mpd_connection_get_error_message(connection.get());
+        return Result::error(lastError_);
+    }
+
+    std::optional<unsigned> selectedId;
+    bool currentlyEnabled = false;
+    while (mpd_output* rawOutput = mpd_recv_output(connection.get())) {
+        OutputPtr output{rawOutput, &mpd_output_free};
+        const char* rawName = mpd_output_get_name(output.get());
+        const std::string_view name = rawName == nullptr ? std::string_view{} : rawName;
+        if (!selectedId.has_value() &&
+            (config_.audioOutputName.empty() || name == config_.audioOutputName)) {
+            selectedId = mpd_output_get_id(output.get());
+            currentlyEnabled = mpd_output_get_enabled(output.get());
+        }
+    }
+    if (!mpd_response_finish(connection.get())) {
+        lastError_ = mpd_connection_get_error_message(connection.get());
+        return Result::error(lastError_);
+    }
+    if (!selectedId.has_value()) {
+        lastError_ = "MPD audio output not found: " + config_.audioOutputName;
+        return Result::error(lastError_);
+    }
+    if (currentlyEnabled == enabled) {
+        lastError_.clear();
+        return Result::ok(enabled ? "MPD audio output is already enabled"
+                                  : "MPD audio output is already disabled");
+    }
+    const bool changed = enabled
+        ? mpd_run_enable_output(connection.get(), *selectedId)
+        : mpd_run_disable_output(connection.get(), *selectedId);
+    return commandResult(connection.get(), changed, lastError_,
+                         enabled ? "Enable MPD audio output" : "Disable MPD audio output");
 }
 
 std::string MpdClient::lastError() const {

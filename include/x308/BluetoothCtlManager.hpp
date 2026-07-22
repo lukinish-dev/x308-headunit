@@ -32,8 +32,6 @@ public:
     [[nodiscard]] Result remove(std::string_view mac) override;
     [[nodiscard]] Result setPairingMode(bool enabled) override;
     [[nodiscard]] Result autoConnect() override;
-    [[nodiscard]] Result activateAudio() override;
-    [[nodiscard]] Result releaseAudio() override;
     [[nodiscard]] std::string lastError() const override;
 
     [[nodiscard]] static bool isValidMac(std::string_view mac);

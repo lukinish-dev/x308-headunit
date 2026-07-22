@@ -251,6 +251,8 @@ Result BluetoothCtlManager::setPairingMode(const bool enabled) {
 }
 
 Result BluetoothCtlManager::autoConnect() {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds{config_.autoConnectTimeoutSeconds};
     const auto list = execute(
         {"devices", "Trusted"}, std::chrono::milliseconds{900},
         std::chrono::milliseconds{100});
@@ -266,31 +268,26 @@ Result BluetoothCtlManager::autoConnect() {
             logger_->log(LogLevel::info,
                          "Bluetooth auto-connect attempt for " + candidate.mac);
         }
-        const auto result = executeAction(
-            {"connect", candidate.mac}, "Connect", std::chrono::seconds{4});
-        if (result.success) {
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now());
+        if (remaining <= std::chrono::milliseconds::zero()) {
+            lastError_ = "Bluetooth auto-connect deadline exceeded";
+            break;
+        }
+        const auto processTimeout = std::min(remaining, std::chrono::milliseconds{5000});
+        const auto process = execute({"connect", candidate.mac}, processTimeout,
+                                     std::chrono::milliseconds::zero());
+        if (!commandFailed(process)) {
             return Result::ok("Connected to " +
                               (candidate.name.empty() ? candidate.mac : candidate.name));
         }
         if (logger_ != nullptr) {
             logger_->log(LogLevel::warning,
                          "Bluetooth auto-connect failed for " + candidate.mac + ": " +
-                             result.message);
+                             lastError_);
         }
     }
     return Result::error("No trusted Bluetooth device could be connected: " + lastError_);
-}
-
-Result BluetoothCtlManager::activateAudio() {
-    const auto current = status();
-    if (current.activeAudioDevice.has_value()) return Result::ok("Bluetooth audio device is connected");
-    return config_.autoConnect ? autoConnect() : Result::error("No Bluetooth audio device connected");
-}
-
-Result BluetoothCtlManager::releaseAudio() {
-    const auto current = status();
-    if (!current.activeAudioDevice.has_value()) return Result::ok("No Bluetooth stream is active");
-    return disconnect(current.activeAudioDevice->mac);
 }
 
 std::string BluetoothCtlManager::lastError() const { return lastError_; }

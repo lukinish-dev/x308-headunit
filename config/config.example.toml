@@ -6,17 +6,23 @@ startup_timeout_seconds = 10
 host = "localhost"
 port = 6600
 music_directory = "/mnt/music"
+audio_output_name = "ES8316"
 
 [bluetooth]
 adapter = "hci0"
 device_name = "Jaguar XJR"
 auto_connect = true
+auto_connect_timeout_seconds = 10
+media_dbus_timeout_ms = 800
 discoverable_timeout_seconds = 120
 auto_accept_pairing = true
 
 [audio]
 default_source = "mpd"
+bluetooth_backend = "bluealsa"
+alsa_pcm = "plughw:CARD=rockchipes8316,DEV=0"
+bluealsa_aplay_service = "bluealsa-aplay.service"
+command_timeout_ms = 2000
 
 [logging]
 level = "info"
-

@@ -1,6 +1,7 @@
 #include "x308/Configuration.hpp"
 #include "x308/MpdClient.hpp"
 #include "x308/BluetoothCtlManager.hpp"
+#include "x308/BluezDbusMediaController.hpp"
 #include "x308/ProcessRunner.hpp"
 #include "x308/HardwareStubs.hpp"
 #include "x308/SourceManager.hpp"
@@ -54,6 +55,23 @@ int main(const int argc, const char* const* argv) {
                   << " trusted Bluetooth device(s) without changing adapter state\n";
         return 0;
     }
+    if (std::string_view{argv[1]} == "bluetooth-media") {
+        auto runner = std::make_shared<x308::PosixProcessRunner>(
+            std::chrono::milliseconds{800}, std::chrono::milliseconds{50});
+        x308::BluezDbusMediaController media{runner, std::chrono::milliseconds{800}};
+        const auto status = media.status();
+        if (!status.available) {
+            if (status.error.find("MediaPlayer1 is unavailable") != std::string::npos) {
+                std::cout << "BlueZ ObjectManager is available; no MediaPlayer1 is currently present\n";
+                return 0;
+            }
+            std::cerr << "Cannot read BlueZ media objects: " << status.error << '\n';
+            return 1;
+        }
+        std::cout << "BlueZ MediaPlayer1 found for " << status.deviceName
+                  << "; metadata_present=" << status.currentTrack.has_value() << '\n';
+        return 0;
+    }
     if (std::string_view{argv[1]} == "status") {
         const auto config = x308::ConfigurationLoader::load();
         constexpr auto mpdTimeout = std::chrono::milliseconds{180};
@@ -65,7 +83,7 @@ int main(const int argc, const char* const* argv) {
         x308::NullAudioOutput audioOutput;
         const auto initialSource = config.audio.defaultSource == "bluetooth"
             ? x308::AudioSource::bluetooth : x308::AudioSource::mpd;
-        x308::SourceManager sourceManager{mpd, bluetooth, audioOutput, initialSource};
+        x308::SourceManager sourceManager{mpd, audioOutput, initialSource};
         x308::SystemStatusService service{
             mpd, bluetooth, sourceManager, config.mpd.musicDirectory, "integration", "Debug"};
         const auto report = service.collect();

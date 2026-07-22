@@ -10,6 +10,7 @@
 namespace x308 {
 
 class IBluetoothManager;
+class IBluetoothMediaController;
 class IMediaPlayer;
 class SourceManager;
 class SystemStatusService;
@@ -35,6 +36,7 @@ public:
 class Cli {
 public:
     Cli(IMediaPlayer& mediaPlayer, IBluetoothManager& bluetooth,
+        IBluetoothMediaController& bluetoothMedia,
         SourceManager& sourceManager, SystemStatusService& systemStatus,
         std::ostream& output, std::ostream& error);
 
@@ -43,6 +45,7 @@ public:
 private:
     IMediaPlayer& mediaPlayer_;
     IBluetoothManager& bluetooth_;
+    IBluetoothMediaController& bluetoothMedia_;
     SourceManager& sourceManager_;
     SystemStatusService& systemStatus_;
     std::ostream& output_;

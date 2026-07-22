@@ -1,8 +1,9 @@
 # x308-headunit
 
 Консольное приложение головного устройства Jaguar X308 для Rock Pi 4B Plus.
-Текущая версия управляет MPD, устройствами BlueZ через `bluetoothctl`, выбором
-источника и read-only системным статусом.
+Текущая версия управляет MPD, устройствами BlueZ через `bluetoothctl`, A2DP
+receiver через BlueALSA, AVRCP через BlueZ D-Bus, выбором источника и read-only
+системным статусом.
 
 ## Системные зависимости
 
@@ -38,8 +39,9 @@ ctest --test-dir build-integration --output-on-failure -L integration
 ```
 
 Integration tests только читают MPD/Bluetooth status, queue/library и trusted
-devices. Они не запускают scan/pairing, не подключают и не удаляют устройства,
-не очищают очередь и не обновляют базу MPD.
+devices, а также ObjectManager media status. Они не запускают scan/pairing, не
+подключают и не удаляют устройства, не вызывают AVRCP playback, не переключают
+audio service, не очищают очередь и не обновляют базу MPD.
 
 ## Запуск и статус
 
@@ -96,19 +98,44 @@ Read-only команды:
 pairing agent до отключения режима или выхода из приложения. Все одноразовые
 вызовы `bluetoothctl` имеют жёсткий timeout и не используют shell-команды.
 
+AVRCP status и управление подключённым телефоном:
+
+```bash
+./build/x308-headunit bluetooth current
+./build/x308-headunit bluetooth play
+./build/x308-headunit bluetooth pause
+./build/x308-headunit bluetooth toggle
+./build/x308-headunit bluetooth next
+./build/x308-headunit bluetooth previous
+```
+
+При `bluetooth.auto_connect = true` приложение на старте выполняет bounded
+ordered подключение trusted devices. Ошибка или отсутствующий телефон пишутся в
+технический лог и не препятствуют запуску CLI/меню.
+
+Реальное переключение выполняется командами `source set bluetooth` и
+`source set mpd`. MPD output `ES8316` выключается/включается через libmpdclient,
+а `bluealsa-aplay.service` останавливается/запускается через bounded `systemctl`.
+Пользователю приложения требуется соответствующее разрешение polkit/systemd;
+скрытого `sudo` нет.
+
+Фактический аудит и риски описаны в
+[docs/BLUETOOTH_RUNTIME.md](docs/BLUETOOTH_RUNTIME.md), полный сценарий с
+iPhone — в [docs/MANUAL_TESTS.md](docs/MANUAL_TESTS.md).
+
 ## Известные ограничения
 
-- Реальные pairing/connect/A2DP/AVRCP и переключение источников требуют телефона
-  и выполняются только по ручному сценарию.
-- Текущий `bluetoothctl` backend не умеет надёжно определить активный A2DP stream.
-  Поэтому Bluetooth → MPD пока не гарантирует освобождение ALSA output.
-- AVRCP Target объявлен BlueZ, а `MediaControl1` доступен через D-Bus, но
-  bluetoothctl backend приложения не предоставляет AVRCP-команды или metadata.
-  Для этого нужен отдельный ограниченный BlueZ D-Bus этап.
-- Автоподключение не запускается автоматически при старте приложения. Команда
-  `bluetooth auto-connect` делает не более трёх пятисекундных попыток в порядке
-  списка trusted devices.
+- Реальные pairing/connect/A2DP/AVRCP и переключение источников требуют телефона,
+  слышимого output и выполняются только по ручному сценарию.
+- `MediaPlayer1` существует только при подключённом совместимом AVRCP source;
+  без него `bluetooth current` корректно сообщает unavailable.
+- Автоподключение делает не более трёх попыток и ограничено общим startup
+  deadline; iOS может оставаться недоступной до действия пользователя.
 - PipeWire/WirePlumber и BlueALSA работают одновременно. Выбор одного системного
-  Bluetooth audio backend требует отдельного согласованного изменения системы.
+  Bluetooth audio backend и исключение потенциальной конкуренции требуют
+  отдельного согласованного изменения системы.
+- Source switching зависит от права управлять `bluealsa-aplay.service`. При
+  отказе active source не меняется, но ошибка посередине может оставить MPD на
+  паузе и будет явно отмечена как partial failure.
 - Состояние `SourceManager` хранится в процессе; для последовательной проверки
   переключений используйте интерактивное меню.
