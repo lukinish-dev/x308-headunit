@@ -39,12 +39,24 @@ Git-теги и опубликованные версии пока не созд
   границами ответственности, правилами зависимостей, тестовой стратегией и
   известными отклонениями текущего кода.
 - Добавлены Roadmap и этот Changelog.
+- Добавлены `SystemStatusReport` и read-only `SystemStatusService`, агрегирующие
+  версию и build type, uptime приложения и системы, hostname/kernel, состояние
+  `/mnt/music`, MPD, Bluetooth и активный источник.
+- Добавлен общий `SystemStatusPresenter`, используемый командой
+  `x308-headunit status` и пунктом «Состояние системы» интерактивного меню.
+- Добавлены unit-тесты агрегации, отсутствующего storage, общего presenter и
+  отсутствия изменяющих вызовов, а также безопасный integration-тест с бюджетом
+  получения статуса менее 200 мс.
 
 ### Changed
 
 - Обычные одноразовые вызовы `bluetoothctl` больше не используют задерживающий
   флаг `--timeout`; ограничение времени обеспечивает общий ProcessRunner.
 - Bluetooth status сокращён до одного безопасного запроса `bluetoothctl show`.
+- `PosixProcessRunner` поддерживает необязательный верхний предел запрошенного
+  timeout и настраиваемый grace period для коротких диагностических probes.
+- Независимые MPD и Bluetooth probes SystemStatus выполняются параллельно во
+  владеемых потоках с обязательным join и отдельными жёсткими лимитами.
 
 ### Fixed
 
@@ -54,4 +66,3 @@ Git-теги и опубликованные версии пока не созд
   не оставляет потомков после timeout.
 
 [Unreleased]: https://github.com/lukinish-dev/x308-headunit/commits/main
-

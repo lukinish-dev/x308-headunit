@@ -2,6 +2,8 @@
 
 #include "x308/Interfaces.hpp"
 #include "x308/SourceManager.hpp"
+#include "x308/SystemStatusPresenter.hpp"
+#include "x308/SystemStatusService.hpp"
 
 #include <istream>
 #include <ostream>
@@ -28,8 +30,11 @@ void showResult(std::ostream& output, const Result& result) {
 }  // namespace
 
 InteractiveMenu::InteractiveMenu(IMediaPlayer* mediaPlayer, IBluetoothManager* bluetooth,
-                                 SourceManager* sourceManager)
-    : mediaPlayer_(mediaPlayer), bluetooth_(bluetooth), sourceManager_(sourceManager) {}
+                                 SourceManager* sourceManager, SystemStatusService* systemStatus)
+    : mediaPlayer_(mediaPlayer),
+      bluetooth_(bluetooth),
+      sourceManager_(sourceManager),
+      systemStatus_(systemStatus) {}
 
 int InteractiveMenu::run(std::istream& input, std::ostream& output) const {
     std::string selection;
@@ -58,6 +63,8 @@ int InteractiveMenu::run(std::istream& input, std::ostream& output) const {
             static_cast<void>(runMpdMenu(input, output));
         } else if (selection == "3" && sourceManager_ != nullptr) {
             static_cast<void>(runSourceMenu(input, output));
+        } else if (selection == "4" && systemStatus_ != nullptr) {
+            SystemStatusPresenter::print(systemStatus_->collect(), output);
         } else if (selection == "1" || selection == "2" || selection == "3" || selection == "4") {
             output << "Этот модуль будет доступен на следующем этапе.\n";
         } else {

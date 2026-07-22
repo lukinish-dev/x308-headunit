@@ -11,6 +11,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include(CTest)
+find_package(Threads REQUIRED)
 
 find_path(MPDCLIENT_INCLUDE_DIR mpd/client.h
     HINTS ${MPDCLIENT_ROOT}/usr/include
@@ -26,8 +27,10 @@ add_library(x308_core
     src/app/App.cpp
     src/app/Configuration.cpp
     src/app/Logger.cpp
+    src/app/SystemStatusService.cpp
     src/cli/Cli.cpp
     src/cli/InteractiveMenu.cpp
+    src/cli/SystemStatusPresenter.cpp
     src/mpd/MpdClient.cpp
     src/bluetooth/BluetoothCtlManager.cpp
     src/system/ProcessRunner.cpp
@@ -42,7 +45,17 @@ target_include_directories(x308_core
         ${MPDCLIENT_INCLUDE_DIR}
 )
 
-target_link_libraries(x308_core PRIVATE ${MPDCLIENT_LIBRARY})
+target_link_libraries(x308_core PRIVATE ${MPDCLIENT_LIBRARY} Threads::Threads)
+
+if(CMAKE_BUILD_TYPE)
+    set(X308_BUILD_TYPE_VALUE "${CMAKE_BUILD_TYPE}")
+else()
+    set(X308_BUILD_TYPE_VALUE "Unknown")
+endif()
+target_compile_definitions(x308_core PRIVATE
+    X308_VERSION="${PROJECT_VERSION}"
+    X308_BUILD_TYPE="${X308_BUILD_TYPE_VALUE}"
+)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(x308_core PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
@@ -82,5 +95,7 @@ if(BUILD_TESTING)
         set_tests_properties(mpd_integration_test PROPERTIES LABELS "integration")
         add_test(NAME bluetooth_integration_test COMMAND x308_integration_tests bluetooth)
         set_tests_properties(bluetooth_integration_test PROPERTIES LABELS "integration" TIMEOUT 6)
+        add_test(NAME system_status_integration_test COMMAND x308_integration_tests status)
+        set_tests_properties(system_status_integration_test PROPERTIES LABELS "integration" TIMEOUT 1)
     endif()
 endif()

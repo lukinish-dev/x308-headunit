@@ -2,14 +2,20 @@
 
 #include <iosfwd>
 
-namespace x308 { class IMediaPlayer; class IBluetoothManager; class SourceManager; }
+namespace x308 {
+class IMediaPlayer;
+class IBluetoothManager;
+class SourceManager;
+class SystemStatusService;
+}
 
 namespace x308 {
 
 class InteractiveMenu {
 public:
     InteractiveMenu(IMediaPlayer* mediaPlayer = nullptr, IBluetoothManager* bluetooth = nullptr,
-                    SourceManager* sourceManager = nullptr);
+                    SourceManager* sourceManager = nullptr,
+                    SystemStatusService* systemStatus = nullptr);
     [[nodiscard]] int run(std::istream& input, std::ostream& output) const;
 
 private:
@@ -19,6 +25,7 @@ private:
     IMediaPlayer* mediaPlayer_;
     IBluetoothManager* bluetooth_;
     SourceManager* sourceManager_;
+    SystemStatusService* systemStatus_;
 };
 
 }  // namespace x308

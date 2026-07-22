@@ -64,6 +64,12 @@ void reapAfterKill(const pid_t child, int& waitStatus) {
 
 }  // namespace
 
+PosixProcessRunner::PosixProcessRunner(
+    std::optional<std::chrono::milliseconds> maximumTimeout,
+    const std::chrono::milliseconds terminationGrace)
+    : maximumTimeout_(maximumTimeout),
+      terminationGrace_(std::max(terminationGrace, std::chrono::milliseconds{0})) {}
+
 ProcessResult PosixProcessRunner::run(const std::string_view executable,
                                      const std::vector<std::string>& arguments,
                                      const std::chrono::milliseconds timeout) {
@@ -110,7 +116,9 @@ ProcessResult PosixProcessRunner::run(const std::string_view executable,
     static_cast<void>(fcntl(outputPipe[0], F_SETFL, O_NONBLOCK));
     static_cast<void>(fcntl(errorPipe[0], F_SETFL, O_NONBLOCK));
 
-    const auto effectiveTimeout = std::max(timeout, std::chrono::milliseconds{1});
+    const auto cappedTimeout = maximumTimeout_.has_value()
+        ? std::min(timeout, *maximumTimeout_) : timeout;
+    const auto effectiveTimeout = std::max(cappedTimeout, std::chrono::milliseconds{1});
     const auto deadline = std::chrono::steady_clock::now() + effectiveTimeout;
     int waitStatus = 0;
     bool childExited = false;
@@ -119,7 +127,7 @@ ProcessResult PosixProcessRunner::run(const std::string_view executable,
         if (now >= deadline) {
             result.timedOut = true;
             signalProcessGroup(child, SIGTERM);
-            const auto graceDeadline = now + std::chrono::milliseconds{100};
+            const auto graceDeadline = now + terminationGrace_;
             while (!childExited && std::chrono::steady_clock::now() < graceDeadline) {
                 childExited = reapWithoutBlocking(child, waitStatus);
                 if (!childExited) static_cast<void>(poll(nullptr, 0, 5));

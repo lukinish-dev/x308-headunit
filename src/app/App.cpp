@@ -9,7 +9,10 @@
 #include "x308/HardwareStubs.hpp"
 #include "x308/ProcessRunner.hpp"
 #include "x308/SourceManager.hpp"
+#include "x308/SystemStatusPresenter.hpp"
+#include "x308/SystemStatusService.hpp"
 
+#include <chrono>
 #include <iostream>
 #include <string>
 
@@ -182,6 +185,7 @@ int runSourceCommand(SourceManager& manager, const std::vector<std::string>& com
 }  // namespace
 
 int App::run(const int argc, const char* const* argv) const {
+    const auto applicationStartedAt = std::chrono::steady_clock::now();
     CliArguments arguments;
     try {
         arguments = CliParser::parse(argc, argv);
@@ -222,10 +226,25 @@ int App::run(const int argc, const char* const* argv) const {
                                           ? AudioSource::bluetooth : AudioSource::mpd;
     SourceManager sourceManager{mpd, bluetooth, audioOutput, initialSource};
 
+    constexpr auto statusMpdTimeout = std::chrono::milliseconds{180};
+    constexpr auto statusBluetoothTimeout = std::chrono::milliseconds{100};
+    MpdClient statusMpd{config.mpd, static_cast<unsigned>(statusMpdTimeout.count())};
+    auto statusProcessRunner = std::make_shared<PosixProcessRunner>(
+        statusBluetoothTimeout, std::chrono::milliseconds{10});
+    BluetoothCtlManager statusBluetooth{config.bluetooth, statusProcessRunner};
+    SystemStatusService systemStatus{
+        statusMpd, statusBluetooth, sourceManager, config.mpd.musicDirectory, X308_VERSION,
+        X308_BUILD_TYPE, applicationStartedAt};
+
     if (arguments.command.empty()) {
-        return InteractiveMenu{&mpd, &bluetooth, &sourceManager}.run(std::cin, std::cout);
+        return InteractiveMenu{&mpd, &bluetooth, &sourceManager, &systemStatus}.run(
+            std::cin, std::cout);
     }
 
+    if (arguments.command.size() == 1 && arguments.command.front() == "status") {
+        SystemStatusPresenter::print(systemStatus.collect(), std::cout);
+        return 0;
+    }
     if (arguments.command.front() == "mpd") return runMpdCommand(mpd, arguments.command);
     if (arguments.command.front() == "bluetooth") return runBluetoothCommand(bluetooth, arguments.command);
     if (arguments.command.front() == "source") return runSourceCommand(sourceManager, arguments.command);

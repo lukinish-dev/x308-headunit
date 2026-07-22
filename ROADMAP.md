@@ -11,12 +11,12 @@
 
 Текущий этап:
 
-🟡 **Milestone 2 — Bluetooth Core**
+🟡 **Milestone 5 — System Status**
 
 Общее состояние:
 
 ```text
-████░░░░░░░░░░░░░░ 20%
+██████░░░░░░░░░░░░ 30%
 ```
 
 ---
@@ -48,28 +48,39 @@
 - Database update
 - Integration tests
 
----
-
-## Current milestone
-
-### Milestone 2 — Bluetooth Core 🟡
-
-**Цель:** получить полностью рабочий Bluetooth Manager без GUI.
-
-Состав:
+### Milestone 2 — Bluetooth Core ✅
 
 - ProcessRunner
 - BluetoothCtlManager
 - Device discovery
 - Pairing
 - Trust
-- Connect
-- Disconnect
+- Connect and disconnect
 - Auto-connect
 - Timeouts
 - Safe integration tests
 
-Следующий результат: **Bluetooth Audio**.
+---
+
+## Current milestone
+
+### Milestone 5 — System Status 🟡
+
+**Цель:** предоставить быстрый read-only отчёт о состоянии системы.
+
+Состав:
+
+- SystemStatusService и SystemStatusReport
+- Application и system uptime
+- Hostname и kernel
+- MPD и Bluetooth status
+- Storage status
+- CLI и интерактивное меню
+- Бюджет менее 200 мс
+- ALSA diagnostics
+- Hardware status
+
+Следующий результат: **полный диагностический отчёт с ALSA и hardware probes**.
 
 ---
 
@@ -91,15 +102,6 @@
 - Rollback
 - Transaction model
 - Audio ownership
-
-### Milestone 5 — System Status
-
-- Diagnostics
-- ALSA
-- Bluetooth
-- MPD
-- Storage
-- Hardware status
 
 ### Milestone 6 — DSP
 
@@ -164,4 +166,3 @@
 
 Roadmap изменяется только при завершении текущего или начале нового milestone.
 Обычные коммиты, исправления ошибок и рефакторинг Roadmap не изменяют.
-
