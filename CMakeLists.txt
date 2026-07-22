@@ -29,6 +29,8 @@ add_library(x308_core
     src/cli/Cli.cpp
     src/cli/InteractiveMenu.cpp
     src/mpd/MpdClient.cpp
+    src/bluetooth/BluetoothCtlManager.cpp
+    src/system/ProcessRunner.cpp
     src/source/SourceManager.cpp
     src/system/HardwareStubs.cpp
 )
@@ -56,10 +58,14 @@ endif()
 if(BUILD_TESTING)
     add_test(NAME app_smoke_test COMMAND x308-headunit --version)
 
+    add_executable(x308_process_fixture tests/unit/ProcessFixture.cpp)
     add_executable(x308_unit_tests
         tests/unit/TestMain.cpp
     )
     target_link_libraries(x308_unit_tests PRIVATE x308_core)
+    target_compile_definitions(x308_unit_tests PRIVATE
+        X308_PROCESS_FIXTURE_PATH="$<TARGET_FILE:x308_process_fixture>"
+    )
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(x308_unit_tests PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
     endif()
@@ -74,5 +80,7 @@ if(BUILD_TESTING)
         endif()
         add_test(NAME mpd_integration_test COMMAND x308_integration_tests mpd)
         set_tests_properties(mpd_integration_test PROPERTIES LABELS "integration")
+        add_test(NAME bluetooth_integration_test COMMAND x308_integration_tests bluetooth)
+        set_tests_properties(bluetooth_integration_test PROPERTIES LABELS "integration" TIMEOUT 6)
     endif()
 endif()
