@@ -41,6 +41,9 @@ public:
     [[nodiscard]] virtual Result startScan() = 0;
     [[nodiscard]] virtual Result stopScan() = 0;
     [[nodiscard]] virtual std::vector<BluetoothDevice> devices() = 0;
+    [[nodiscard]] virtual std::vector<BluetoothDevice> pairedDevices() = 0;
+    [[nodiscard]] virtual std::vector<BluetoothDevice> trustedDevices() = 0;
+    [[nodiscard]] virtual std::vector<BluetoothDevice> connectedDevices() = 0;
     [[nodiscard]] virtual Result pair(std::string_view mac) = 0;
     [[nodiscard]] virtual Result trust(std::string_view mac, bool trusted) = 0;
     [[nodiscard]] virtual Result connect(std::string_view mac) = 0;

@@ -96,6 +96,10 @@ if(BUILD_TESTING)
         set_tests_properties(mpd_integration_test PROPERTIES LABELS "integration")
         add_test(NAME bluetooth_integration_test COMMAND x308_integration_tests bluetooth)
         set_tests_properties(bluetooth_integration_test PROPERTIES LABELS "integration" TIMEOUT 6)
+        add_test(NAME bluetooth_devices_integration_test
+            COMMAND x308_integration_tests bluetooth-devices)
+        set_tests_properties(bluetooth_devices_integration_test
+            PROPERTIES LABELS "integration" TIMEOUT 6)
         add_test(NAME system_status_integration_test COMMAND x308_integration_tests status)
         set_tests_properties(system_status_integration_test PROPERTIES LABELS "integration" TIMEOUT 1)
     endif()

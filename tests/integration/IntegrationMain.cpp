@@ -29,6 +29,31 @@ int main(const int argc, const char* const* argv) {
         std::cout << "Bluetooth adapter is available\n";
         return 0;
     }
+    if (std::string_view{argv[1]} == "bluetooth-devices") {
+        const auto config = x308::ConfigurationLoader::load();
+        auto runner = std::make_shared<x308::PosixProcessRunner>(
+            std::chrono::seconds{2}, std::chrono::milliseconds{50});
+        x308::BluetoothCtlManager bluetooth{config.bluetooth, runner};
+        const auto trusted = bluetooth.trustedDevices();
+        if (!bluetooth.lastError().empty()) {
+            std::cerr << "Cannot read trusted Bluetooth devices: "
+                      << bluetooth.lastError() << '\n';
+            return 1;
+        }
+        for (const auto& device : trusted) {
+            if (!device.trusted) {
+                std::cerr << "Trusted device query returned an untrusted device\n";
+                return 1;
+            }
+            std::cout << device.mac << ' ' << device.name
+                      << " paired=" << device.paired
+                      << " trusted=" << device.trusted
+                      << " connected=" << device.connected << '\n';
+        }
+        std::cout << "Read " << trusted.size()
+                  << " trusted Bluetooth device(s) without changing adapter state\n";
+        return 0;
+    }
     if (std::string_view{argv[1]} == "status") {
         const auto config = x308::ConfigurationLoader::load();
         constexpr auto mpdTimeout = std::chrono::milliseconds{180};
@@ -77,6 +102,24 @@ int main(const int argc, const char* const* argv) {
         std::cerr << "Music directory unavailable\n";
         return 1;
     }
-    std::cout << "MPD and music directory are available\n";
+    const auto queue = client.queue();
+    if (!client.lastError().empty()) {
+        std::cerr << "Cannot read MPD queue: " << client.lastError() << '\n';
+        return 1;
+    }
+    const auto library = client.library({});
+    if (!client.lastError().empty() || library.empty()) {
+        std::cerr << "Cannot browse MPD library: " << client.lastError() << '\n';
+        return 1;
+    }
+    const auto missing = client.library("x308-integration-path-that-does-not-exist");
+    if (!missing.empty() || client.lastError().empty()) {
+        std::cerr << "Unknown MPD path did not return an error\n";
+        return 1;
+    }
+    std::cout << "MPD state read; current_track=" << status.currentTrack.has_value()
+              << " queue_size=" << queue.size()
+              << " library_entries=" << library.size()
+              << " unknown_path_error=1\n";
     return 0;
 }

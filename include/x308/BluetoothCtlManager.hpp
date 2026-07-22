@@ -9,9 +9,12 @@
 
 namespace x308 {
 
+class Logger;
+
 class BluetoothCtlManager final : public IBluetoothManager {
 public:
-    BluetoothCtlManager(BluetoothConfig config, std::shared_ptr<IProcessRunner> processRunner);
+    BluetoothCtlManager(BluetoothConfig config, std::shared_ptr<IProcessRunner> processRunner,
+                        Logger* logger = nullptr);
     ~BluetoothCtlManager() override;
 
     [[nodiscard]] BluetoothStatus status() override;
@@ -19,6 +22,9 @@ public:
     [[nodiscard]] Result startScan() override;
     [[nodiscard]] Result stopScan() override;
     [[nodiscard]] std::vector<BluetoothDevice> devices() override;
+    [[nodiscard]] std::vector<BluetoothDevice> pairedDevices() override;
+    [[nodiscard]] std::vector<BluetoothDevice> trustedDevices() override;
+    [[nodiscard]] std::vector<BluetoothDevice> connectedDevices() override;
     [[nodiscard]] Result pair(std::string_view mac) override;
     [[nodiscard]] Result trust(std::string_view mac, bool trusted) override;
     [[nodiscard]] Result connect(std::string_view mac) override;
@@ -52,6 +58,7 @@ private:
 
     BluetoothConfig config_;
     std::shared_ptr<IProcessRunner> processRunner_;
+    Logger* logger_;
     std::unique_ptr<AgentProcess> agent_;
     std::string lastError_;
 };

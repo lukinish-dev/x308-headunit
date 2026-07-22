@@ -51,6 +51,12 @@ Git-теги и опубликованные версии пока не созд
   Created, Initialized, Running, Stopping и Stopped с единым shutdown.
 - Добавлен инжектируемый `Cli`, который содержит command dispatch и presentation,
   ранее находившиеся в composition root.
+- Добавлены отдельные paired/trusted/connected queries, bounded ordered
+  auto-connect с техническим логированием и unit-тесты fallback/timeout.
+- Добавлены read-only integration-проверки MPD queue/library/current и trusted
+  Bluetooth devices, а также руководство `docs/MANUAL_TESTS.md`.
+- Добавлен README со сборкой, runtime-командами, обнаруженным BlueALSA backend и
+  честными ограничениями A2DP/AVRCP/SourceManager.
 
 ### Changed
 
@@ -66,6 +72,9 @@ Git-теги и опубликованные версии пока не созд
   SystemStatus, CLI и InteractiveMenu; дублирующие status adapters удалены.
 - Logger получил явного владельца и больше не хранит глобальное изменяемое
   состояние.
+- Интерактивные MPD/Bluetooth menus теперь покрывают toggle, random, repeat,
+  add-folder и отдельные paired/trusted lists через существующие сервисы.
+- Пользовательские CLI statuses и успешные результаты выводятся на русском.
 
 ### Fixed
 
@@ -73,5 +82,12 @@ Git-теги и опубликованные версии пока не созд
   игнорирует `SIGTERM` или оставляет pipe открытым в дочернем процессе.
 - Завершение внешнего процесса теперь распространяется на всю process group и
   не оставляет потомков после timeout.
+- Cached disconnected Bluetooth devices больше не помечаются available; признак
+  требует connected state или актуального RSSI.
+- Неизвестная или неполная module command теперь возвращает nonzero и показывает
+  CLI help.
+- Read-only MPD status восстанавливается после подтверждённого немедленного
+  transient timeout одной ограниченной повторной попыткой, не повторяя
+  полноценный timeout недоступного сервера.
 
 [Unreleased]: https://github.com/lukinish-dev/x308-headunit/commits/main

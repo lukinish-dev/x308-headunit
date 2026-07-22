@@ -3,6 +3,7 @@
 #include <mpd/client.h>
 
 #include <algorithm>
+#include <chrono>
 #include <memory>
 #include <string>
 #include <utility>
@@ -57,24 +58,17 @@ PlaybackState convertState(const mpd_state state) {
     return PlaybackState::unknown;
 }
 
-}  // namespace
-
-MpdClient::MpdClient(MpdConfig config, const unsigned timeoutMilliseconds)
-    : config_(std::move(config)), timeoutMilliseconds_(timeoutMilliseconds) {}
-
-MediaStatus MpdClient::status() {
+MediaStatus readStatus(const MpdConfig& config, const unsigned timeout, std::string& error) {
     MediaStatus result;
-    constexpr unsigned statusTimeoutMilliseconds = 180;
-    auto connection = connect(
-        config_, std::min(timeoutMilliseconds_, statusTimeoutMilliseconds), lastError_);
+    auto connection = connect(config, timeout, error);
     if (!connection) {
-        result.error = lastError_;
+        result.error = error;
         return result;
     }
     StatusPtr status{mpd_run_status(connection.get()), &mpd_status_free};
     if (!status) {
-        lastError_ = mpd_connection_get_error_message(connection.get());
-        result.error = lastError_;
+        error = mpd_connection_get_error_message(connection.get());
+        result.error = error;
         return result;
     }
     result.available = true;
@@ -85,11 +79,30 @@ MediaStatus MpdClient::status() {
     SongPtr song{mpd_run_current_song(connection.get()), &mpd_song_free};
     if (song) {
         result.currentTrack = convertSong(song.get());
+        error.clear();
     } else if (mpd_connection_get_error(connection.get()) != MPD_ERROR_SUCCESS) {
-        lastError_ = mpd_connection_get_error_message(connection.get());
-        result.error = lastError_;
+        error = mpd_connection_get_error_message(connection.get());
+        result.error = error;
     } else {
-        lastError_.clear();
+        error.clear();
+    }
+    return result;
+}
+
+}  // namespace
+
+MpdClient::MpdClient(MpdConfig config, const unsigned timeoutMilliseconds)
+    : config_(std::move(config)), timeoutMilliseconds_(timeoutMilliseconds) {}
+
+MediaStatus MpdClient::status() {
+    constexpr unsigned statusTimeoutMilliseconds = 180;
+    constexpr auto immediateFailureWindow = std::chrono::milliseconds{50};
+    const auto timeout = std::min(timeoutMilliseconds_, statusTimeoutMilliseconds);
+    const auto startedAt = std::chrono::steady_clock::now();
+    auto result = readStatus(config_, timeout, lastError_);
+    if (!result.available && result.error == "Timeout" &&
+        std::chrono::steady_clock::now() - startedAt < immediateFailureWindow) {
+        result = readStatus(config_, timeout, lastError_);
     }
     return result;
 }

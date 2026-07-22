@@ -76,7 +76,7 @@ int Application::run(const int argc, const char* const* argv) {
             configuration.application.startupTimeoutSeconds) * 1000U;
         context->mpd = std::make_unique<MpdClient>(configuration.mpd, timeout);
         context->bluetooth = std::make_unique<BluetoothCtlManager>(
-            configuration.bluetooth, context->processRunner);
+            configuration.bluetooth, context->processRunner, context->logger.get());
         context->audioOutput = std::make_unique<NullAudioOutput>();
 
         const auto initialSource = configuration.audio.defaultSource == "bluetooth"

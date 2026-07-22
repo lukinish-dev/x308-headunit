@@ -11,12 +11,12 @@
 
 Текущий этап:
 
-✅ **Architecture Stage — Core Application**
+✅ **Runtime Stage — MPD and Bluetooth Integration**
 
 Общее состояние:
 
 ```text
-███████░░░░░░░░░░░ 35%
+█████████░░░░░░░░░ 45%
 ```
 
 ---
@@ -70,24 +70,32 @@
 - CLI и интерактивное меню
 - Бюджет менее 200 мс
 
+### Architecture Stage — Core Application ✅
+
+- AppContext с явным владением
+- Единый composition root и shutdown
+- Инжектируемые CLI и InteractiveMenu
+- Линейный application lifecycle
+
 ---
 
 ## Latest completed stage
 
-### Architecture Stage — Core Application ✅
+### Runtime Stage — MPD and Bluetooth Integration ✅
 
-**Цель:** сделать Application единственным composition root проекта.
+**Цель:** проверить консольные MPD/Bluetooth сценарии на Rock Pi и подготовить
+hardware-changing операции к контролируемому ручному тесту.
 
 Состав:
 
-- AppContext с явным владением
-- Единый граф зависимостей
-- Инжектируемые CLI и InteractiveMenu
-- Жизненный цикл Created → Initialized → Running → Stopping → Stopped
-- Единый shutdown
-- Отсутствие дублирующих production services
+- Реальная read-only проверка MPD, Bluetooth и storage
+- Полные MPD/Bluetooth CLI и интерактивные menus
+- Bounded ordered Bluetooth auto-connect
+- Определён BlueALSA A2DP Sink backend и ALSA output
+- Исследованы доступные AVRCP D-Bus interfaces
+- Safe integration tests и manual hardware test plan
 
-Результат: **стабильная основа для следующих application services**.
+Результат: **проверяемая консольная версия без автоматических destructive tests**.
 
 ---
 
@@ -95,8 +103,8 @@
 
 ### Milestone 3 — Bluetooth Audio
 
-- A2DP Sink
-- AVRCP
+- BlueALSA A2DP Sink runtime control
+- BlueZ D-Bus AVRCP и metadata
 - Release audio device
 - Source switching
 - Metadata

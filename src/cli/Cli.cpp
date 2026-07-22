@@ -13,12 +13,12 @@ namespace {
 
 std::string_view stateName(const PlaybackState state) {
     switch (state) {
-        case PlaybackState::playing: return "playing";
-        case PlaybackState::paused: return "paused";
-        case PlaybackState::stopped: return "stopped";
-        case PlaybackState::unknown: return "unknown";
+        case PlaybackState::playing: return "воспроизведение";
+        case PlaybackState::paused: return "пауза";
+        case PlaybackState::stopped: return "остановлено";
+        case PlaybackState::unknown: return "неизвестно";
     }
-    return "unknown";
+    return "неизвестно";
 }
 
 void printTrack(const Track& track, std::ostream& output) {
@@ -29,9 +29,12 @@ void printTrack(const Track& track, std::ostream& output) {
 }
 
 int printResult(const Result& result, std::ostream& output, std::ostream& error) {
-    auto& destination = result.success ? output : error;
-    destination << (result.success ? "Готово: " : "Ошибка: ") << result.message << '\n';
-    return result.success ? 0 : 1;
+    if (result.success) {
+        output << "Готово: операция выполнена.\n";
+        return 0;
+    }
+    error << "Ошибка: " << result.message << '\n';
+    return 1;
 }
 
 bool parseSwitch(const std::string& value, bool& enabled) {
@@ -49,10 +52,10 @@ bool parseSwitch(const std::string& value, bool& enabled) {
 void printBluetoothDevice(const BluetoothDevice& device, std::ostream& output) {
     output << "Имя: " << (device.name.empty() ? "—" : device.name) << '\n'
            << "MAC: " << device.mac << '\n'
-           << "Paired: " << (device.paired ? "yes" : "no") << '\n'
-           << "Trusted: " << (device.trusted ? "yes" : "no") << '\n'
-           << "Connected: " << (device.connected ? "yes" : "no") << '\n'
-           << "Available: " << (device.available ? "yes" : "no") << "\n\n";
+           << "Сопряжено: " << (device.paired ? "да" : "нет") << '\n'
+           << "Доверено: " << (device.trusted ? "да" : "нет") << '\n'
+           << "Подключено: " << (device.connected ? "да" : "нет") << '\n'
+           << "Доступно сейчас: " << (device.available ? "да" : "нет") << "\n\n";
 }
 
 }  // namespace
@@ -185,7 +188,7 @@ int Cli::run(const std::vector<std::string>& command) const {
         if (action == "update" && command.size() == 2) {
             return printResult(mediaPlayer_.update(), output_, error_);
         }
-        error_ << "Неизвестная или неполная команда MPD\n";
+        error_ << "Неизвестная или неполная команда MPD\n" << CliParser::helpText();
         return 2;
     }
     if (command.front() == "bluetooth") {
@@ -196,13 +199,13 @@ int Cli::run(const std::vector<std::string>& command) const {
         const auto& action = command[1];
         if (action == "status" && command.size() == 2) {
             const auto status = bluetooth_.status();
-            output_ << "Bluetooth service: "
-                    << (status.serviceAvailable ? "available" : "unavailable")
-                    << "\nAdapter: " << (status.adapterAvailable ? "available" : "unavailable")
-                    << "\nPowered: " << (status.powered ? "yes" : "no")
-                    << "\nDiscovering: " << (status.discovering ? "yes" : "no")
-                    << "\nPairable: " << (status.pairable ? "yes" : "no")
-                    << "\nDiscoverable: " << (status.discoverable ? "yes" : "no") << '\n';
+            output_ << "Служба Bluetooth: "
+                    << (status.serviceAvailable ? "доступна" : "недоступна")
+                    << "\nАдаптер: " << (status.adapterAvailable ? "доступен" : "недоступен")
+                    << "\nПитание: " << (status.powered ? "включено" : "выключено")
+                    << "\nСканирование: " << (status.discovering ? "идёт" : "выключено")
+                    << "\nPairable: " << (status.pairable ? "да" : "нет")
+                    << "\nDiscoverable: " << (status.discoverable ? "да" : "нет") << '\n';
             if (status.activeAudioDevice.has_value()) {
                 output_ << "Активное Bluetooth-аудиоустройство:\n";
                 printBluetoothDevice(*status.activeAudioDevice, output_);
@@ -229,17 +232,15 @@ int Cli::run(const std::vector<std::string>& command) const {
         }
         if ((action == "devices" || action == "paired" || action == "trusted") &&
             command.size() == 2) {
-            const auto devices = bluetooth_.devices();
+            const auto devices = action == "paired" ? bluetooth_.pairedDevices()
+                : action == "trusted" ? bluetooth_.trustedDevices()
+                                      : bluetooth_.devices();
             if (!bluetooth_.lastError().empty()) {
                 error_ << "Ошибка: " << bluetooth_.lastError() << '\n';
                 return 1;
             }
             bool shown = false;
             for (const auto& device : devices) {
-                if ((action == "paired" && !device.paired) ||
-                    (action == "trusted" && !device.trusted)) {
-                    continue;
-                }
                 printBluetoothDevice(device, output_);
                 shown = true;
             }
@@ -266,7 +267,7 @@ int Cli::run(const std::vector<std::string>& command) const {
             if (action == "disconnect") return printResult(bluetooth_.disconnect(mac), output_, error_);
             if (action == "remove") return printResult(bluetooth_.remove(mac), output_, error_);
         }
-        error_ << "Неизвестная или неполная команда Bluetooth\n";
+        error_ << "Неизвестная или неполная команда Bluetooth\n" << CliParser::helpText();
         return 2;
     }
     if (command.front() == "source") {
@@ -283,11 +284,12 @@ int Cli::run(const std::vector<std::string>& command) const {
                 return printResult(sourceManager_.setSource(AudioSource::bluetooth), output_, error_);
             }
         }
-        error_ << "Неизвестная или неполная команда source\n";
+        error_ << "Неизвестная или неполная команда source\n" << CliParser::helpText();
         return 2;
     }
 
-    error_ << "Команда пока не реализована: " << command.front() << '\n';
+    error_ << "Команда пока не реализована: " << command.front() << '\n'
+           << CliParser::helpText();
     return 2;
 }
 

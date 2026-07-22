@@ -10,6 +10,7 @@
 
 #include <iostream>
 #include <chrono>
+#include <deque>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -26,11 +27,21 @@ public:
     std::string executable;
     std::vector<std::string> arguments;
     std::chrono::milliseconds timeout{0};
+    std::deque<x308::ProcessResult> scriptedResults;
+    std::vector<std::vector<std::string>> invocations;
+    std::vector<std::chrono::milliseconds> requestedTimeouts;
     x308::ProcessResult run(std::string_view value, const std::vector<std::string>& args,
                             std::chrono::milliseconds requestedTimeout) override {
         executable = value;
         arguments = args;
         timeout = requestedTimeout;
+        invocations.push_back(args);
+        requestedTimeouts.push_back(requestedTimeout);
+        if (!scriptedResults.empty()) {
+            auto result = scriptedResults.front();
+            scriptedResults.pop_front();
+            return result;
+        }
         return nextResult;
     }
 };
@@ -77,7 +88,18 @@ public:
     x308::Result setPower(bool) override { calls.emplace_back("bt.power"); return x308::Result::ok(); }
     x308::Result startScan() override { calls.emplace_back("bt.scan-start"); return x308::Result::ok(); }
     x308::Result stopScan() override { calls.emplace_back("bt.scan-stop"); return x308::Result::ok(); }
-    std::vector<x308::BluetoothDevice> devices() override { return {}; }
+    std::vector<x308::BluetoothDevice> devices() override {
+        calls.emplace_back("bt.devices"); return {};
+    }
+    std::vector<x308::BluetoothDevice> pairedDevices() override {
+        calls.emplace_back("bt.paired-list"); return {};
+    }
+    std::vector<x308::BluetoothDevice> trustedDevices() override {
+        calls.emplace_back("bt.trusted-list"); return {};
+    }
+    std::vector<x308::BluetoothDevice> connectedDevices() override {
+        calls.emplace_back("bt.connected-list"); return {};
+    }
     x308::Result pair(std::string_view) override { calls.emplace_back("bt.pair"); return x308::Result::ok(); }
     x308::Result trust(std::string_view, bool) override { calls.emplace_back("bt.trust"); return x308::Result::ok(); }
     x308::Result connect(std::string_view) override { calls.emplace_back("bt.connect"); return x308::Result::ok(); }
@@ -93,10 +115,11 @@ public:
 class FakeAudioOutput final : public x308::IAudioOutput {
 public:
     std::vector<std::string>& calls;
+    x308::Result selectionResult{x308::Result::ok()};
     explicit FakeAudioOutput(std::vector<std::string>& value) : calls(value) {}
     x308::Result selectSource(const x308::AudioSource source) override {
         calls.emplace_back(source == x308::AudioSource::mpd ? "audio.mpd" : "audio.bluetooth");
-        return x308::Result::ok();
+        return selectionResult;
     }
     std::string currentDevice() const override { return "fake"; }
 };
@@ -170,6 +193,23 @@ void testSourceManagerSwitchesToMpdWithoutPowerOff() {
     expect(calls == expected, "Bluetooth stream releases without powering adapter off");
 }
 
+void testSourceManagerKeepsSourceWhenOutputSelectionFails() {
+    std::vector<std::string> calls;
+    FakeMediaPlayer mpd{calls};
+    FakeBluetooth bluetooth{calls};
+    FakeAudioOutput output{calls};
+    output.selectionResult = x308::Result::error("ALSA output is busy");
+    x308::SourceManager manager{mpd, bluetooth, output};
+
+    const auto result = manager.setSource(x308::AudioSource::bluetooth);
+    expect(!result.success, "source switch reports output selection failure");
+    expect(manager.activeSource() == x308::AudioSource::mpd,
+           "active source remains unchanged after a failed switch");
+    expect(calls == std::vector<std::string>{
+               "mpd.pause", "mpd.release", "audio.bluetooth"},
+           "source switch stops before Bluetooth activation when output selection fails");
+}
+
 void testMpdModelConversionHandlesMissingTags() {
     const auto track = x308::MpdClient::trackFromMetadata("folder/song.flac", nullptr, "Artist", nullptr);
     expect(track.uri == "folder/song.flac", "MPD URI converted");
@@ -193,6 +233,10 @@ void testBluetoothParsing() {
         "\tTrusted: yes\n\tConnected: no\n", devices.front());
     expect(device.name == "Phone One", "Bluetooth device name parsed");
     expect(device.paired && device.trusted && !device.connected, "Bluetooth flags parsed");
+    expect(!device.available, "cached disconnected device is not reported as available");
+    const auto nearby = x308::BluetoothCtlManager::parseDeviceInfo(
+        "Device AA:BB:CC:DD:EE:FF (public)\n\tRSSI: -42\n", devices.front());
+    expect(nearby.available, "device with a current RSSI is reported as available");
 
     const auto status = x308::BluetoothCtlManager::parseControllerStatus(
         "Controller 54:78:C9:69:E6:1B (public)\n\tPowered: yes\n\tDiscoverable: no\n"
@@ -246,6 +290,30 @@ void testBluetoothStatusUsesBoundedReadOnlyProbe() {
            "Bluetooth status remains a single read-only show command");
     expect(runner->timeout == std::chrono::milliseconds{100},
            "Bluetooth status process has a 100 ms hard timeout");
+}
+
+void testBluetoothAutoConnectTriesTrustedDevicesInOrder() {
+    auto runner = std::make_shared<FakeProcessRunner>();
+    runner->scriptedResults.push_back({
+        0, false,
+        "Device 00:00:00:00:00:01 First Phone\n"
+        "Device 00:00:00:00:00:02 Second Phone\n", {}});
+    runner->scriptedResults.push_back({1, false, "Failed to connect", {}});
+    runner->scriptedResults.push_back({0, false, "Connection successful", {}});
+    x308::BluetoothCtlManager manager{x308::BluetoothConfig{}, runner};
+
+    const auto result = manager.autoConnect();
+    expect(result.success, "auto-connect succeeds with the first reachable trusted device");
+    expect(runner->invocations.size() == 3 &&
+           runner->invocations[0] == std::vector<std::string>({"devices", "Trusted"}) &&
+           runner->invocations[1] ==
+               std::vector<std::string>({"connect", "00:00:00:00:00:01"}) &&
+           runner->invocations[2] ==
+               std::vector<std::string>({"connect", "00:00:00:00:00:02"}),
+           "auto-connect attempts trusted devices in deterministic order");
+    expect(runner->requestedTimeouts[1] == std::chrono::seconds{5} &&
+           runner->requestedTimeouts[2] == std::chrono::seconds{5},
+           "each auto-connect attempt has a hard five-second process timeout");
 }
 
 void testProcessRunnerCapturesSeparateStreams() {
@@ -416,6 +484,63 @@ void testCliDispatchUsesInjectedServices() {
     expect(error.str().empty(), "successful injected CLI command has no error output");
 }
 
+void testCliReportsMpdErrorsAndShowsHelp() {
+    std::vector<std::string> calls;
+    FakeMediaPlayer mpd{calls};
+    mpd.currentStatus.error = "Connection refused";
+    FakeBluetooth bluetooth{calls};
+    FakeAudioOutput audioOutput{calls};
+    x308::SourceManager sourceManager{mpd, bluetooth, audioOutput};
+    x308::SystemStatusService systemStatus{
+        mpd, bluetooth, sourceManager, "/tmp", "test", "Test"};
+    std::ostringstream output;
+    std::ostringstream error;
+    x308::Cli cli{mpd, bluetooth, sourceManager, systemStatus, output, error};
+
+    expect(cli.run({"mpd", "status"}) == 1 &&
+           error.str().find("MPD недоступен") != std::string::npos,
+           "CLI returns a nonzero code for unavailable MPD");
+    error.str("");
+    error.clear();
+    expect(cli.run({"mpd", "unknown"}) == 2 &&
+           error.str().find("Использование:") != std::string::npos,
+           "unknown module command prints help");
+}
+
+void testInteractiveMenuExposesMpdRuntimeActions() {
+    std::vector<std::string> calls;
+    FakeMediaPlayer mpd{calls};
+    FakeBluetooth bluetooth{calls};
+    FakeAudioOutput audioOutput{calls};
+    x308::SourceManager sourceManager{mpd, bluetooth, audioOutput};
+    x308::SystemStatusService systemStatus{
+        mpd, bluetooth, sourceManager, "/tmp", "test", "Test"};
+    x308::InteractiveMenu menu{&mpd, &bluetooth, &sourceManager, &systemStatus};
+    std::istringstream input{"2\n4\n13\n16\n0\n0\n"};
+    std::ostringstream output;
+
+    expect(menu.run(input, output) == 0, "interactive MPD actions complete");
+    expect(calls == std::vector<std::string>{"mpd.toggle", "mpd.random", "mpd.repeat"},
+           "menu exposes toggle, random and repeat through the media service");
+}
+
+void testInteractiveMenuExposesBluetoothDeviceLists() {
+    std::vector<std::string> calls;
+    FakeMediaPlayer mpd{calls};
+    FakeBluetooth bluetooth{calls};
+    FakeAudioOutput audioOutput{calls};
+    x308::SourceManager sourceManager{mpd, bluetooth, audioOutput};
+    x308::SystemStatusService systemStatus{
+        mpd, bluetooth, sourceManager, "/tmp", "test", "Test"};
+    x308::InteractiveMenu menu{&mpd, &bluetooth, &sourceManager, &systemStatus};
+    std::istringstream input{"1\n7\n8\n0\n0\n"};
+    std::ostringstream output;
+
+    expect(menu.run(input, output) == 0, "interactive Bluetooth lists complete");
+    expect(calls == std::vector<std::string>{"bt.paired-list", "bt.trusted-list"},
+           "menu uses dedicated paired and trusted service queries");
+}
+
 }  // namespace
 
 int main() {
@@ -425,6 +550,7 @@ int main() {
     testCliErrors();
     testSourceManagerSwitchesToBluetoothInOrder();
     testSourceManagerSwitchesToMpdWithoutPowerOff();
+    testSourceManagerKeepsSourceWhenOutputSelectionFails();
     testMpdModelConversionHandlesMissingTags();
     testMacValidation();
     testBluetoothParsing();
@@ -432,6 +558,7 @@ int main() {
     testFirstAvailableTrustedDevice();
     testBluetoothTimeoutIsReported();
     testBluetoothStatusUsesBoundedReadOnlyProbe();
+    testBluetoothAutoConnectTriesTrustedDevicesInOrder();
     testProcessRunnerCapturesSeparateStreams();
     testProcessRunnerKillsProcessTreeAtDeadline();
     testProcessRunnerCapsRequestedTimeout();
@@ -441,6 +568,9 @@ int main() {
     testSystemStatusCollectsModuleStatusesConcurrently();
     testApplicationLifecycleAndComposition();
     testCliDispatchUsesInjectedServices();
+    testCliReportsMpdErrorsAndShowsHelp();
+    testInteractiveMenuExposesMpdRuntimeActions();
+    testInteractiveMenuExposesBluetoothDeviceLists();
     if (failures == 0) {
         std::cout << "All unit tests passed\n";
     }

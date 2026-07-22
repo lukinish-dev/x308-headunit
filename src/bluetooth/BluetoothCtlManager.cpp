@@ -1,5 +1,7 @@
 #include "x308/BluetoothCtlManager.hpp"
 
+#include "x308/Logger.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cerrno>
@@ -118,8 +120,9 @@ private:
 };
 
 BluetoothCtlManager::BluetoothCtlManager(BluetoothConfig config,
-                                         std::shared_ptr<IProcessRunner> processRunner)
-    : config_(std::move(config)), processRunner_(std::move(processRunner)) {}
+                                         std::shared_ptr<IProcessRunner> processRunner,
+                                         Logger* logger)
+    : config_(std::move(config)), processRunner_(std::move(processRunner)), logger_(logger) {}
 
 BluetoothCtlManager::~BluetoothCtlManager() = default;
 
@@ -181,6 +184,18 @@ std::vector<BluetoothDevice> BluetoothCtlManager::listDevices(const std::optiona
 
 std::vector<BluetoothDevice> BluetoothCtlManager::devices() { return listDevices(std::nullopt); }
 
+std::vector<BluetoothDevice> BluetoothCtlManager::pairedDevices() {
+    return listDevices("Paired");
+}
+
+std::vector<BluetoothDevice> BluetoothCtlManager::trustedDevices() {
+    return listDevices("Trusted");
+}
+
+std::vector<BluetoothDevice> BluetoothCtlManager::connectedDevices() {
+    return listDevices("Connected");
+}
+
 Result BluetoothCtlManager::pair(const std::string_view mac) {
     if (!isValidMac(mac)) return Result::error("Invalid Bluetooth MAC address");
     std::vector<std::string> args{"--agent", config_.autoAcceptPairing ? "NoInputNoOutput" : "DisplayYesNo",
@@ -236,9 +251,34 @@ Result BluetoothCtlManager::setPairingMode(const bool enabled) {
 }
 
 Result BluetoothCtlManager::autoConnect() {
-    const auto candidate = firstAvailableTrusted(devices());
-    if (!candidate.has_value()) return Result::error("No available trusted Bluetooth device");
-    return connect(candidate->mac);
+    const auto list = execute(
+        {"devices", "Trusted"}, std::chrono::milliseconds{900},
+        std::chrono::milliseconds{100});
+    if (commandFailed(list)) return Result::error(lastError_);
+    const auto candidates = parseDeviceList(list.standardOutput);
+    if (candidates.empty()) return Result::error("No trusted Bluetooth device");
+
+    constexpr std::size_t maximumAttempts = 3;
+    const auto attempts = std::min(candidates.size(), maximumAttempts);
+    for (std::size_t index = 0; index < attempts; ++index) {
+        const auto& candidate = candidates[index];
+        if (logger_ != nullptr) {
+            logger_->log(LogLevel::info,
+                         "Bluetooth auto-connect attempt for " + candidate.mac);
+        }
+        const auto result = executeAction(
+            {"connect", candidate.mac}, "Connect", std::chrono::seconds{4});
+        if (result.success) {
+            return Result::ok("Connected to " +
+                              (candidate.name.empty() ? candidate.mac : candidate.name));
+        }
+        if (logger_ != nullptr) {
+            logger_->log(LogLevel::warning,
+                         "Bluetooth auto-connect failed for " + candidate.mac + ": " +
+                             result.message);
+        }
+    }
+    return Result::error("No trusted Bluetooth device could be connected: " + lastError_);
 }
 
 Result BluetoothCtlManager::activateAudio() {
@@ -273,7 +313,9 @@ std::vector<BluetoothDevice> BluetoothCtlManager::parseDeviceList(const std::str
     std::string name;
     while (lines >> prefix >> mac) {
         std::getline(lines, name);
-        if (prefix == "Device" && isValidMac(mac)) devices.push_back({trim(name), mac, false, false, false, true});
+        if (prefix == "Device" && isValidMac(mac)) {
+            devices.push_back({trim(name), mac, false, false, false, false});
+        }
     }
     return devices;
 }
@@ -287,6 +329,7 @@ BluetoothDevice BluetoothCtlManager::parseDeviceInfo(const std::string_view outp
     device.paired = property(output, "Paired");
     device.trusted = property(output, "Trusted");
     device.connected = property(output, "Connected");
+    device.available = device.connected || !propertyValue(output, "RSSI").empty();
     return device;
 }
 
