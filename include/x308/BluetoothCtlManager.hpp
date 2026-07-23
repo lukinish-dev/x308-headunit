@@ -10,6 +10,7 @@
 namespace x308 {
 
 class Logger;
+enum class LogLevel;
 
 class BluetoothCtlManager final : public IBluetoothManager {
 public:
@@ -39,11 +40,13 @@ public:
     [[nodiscard]] static BluetoothDevice parseDeviceInfo(std::string_view output,
                                                          BluetoothDevice device = {});
     [[nodiscard]] static BluetoothStatus parseControllerStatus(std::string_view output);
+    [[nodiscard]] static bool isConnectionInProgress(const ProcessResult& result);
     [[nodiscard]] static std::optional<BluetoothDevice> firstAvailableTrusted(
         const std::vector<BluetoothDevice>& devices);
 
 private:
     class AgentProcess;
+    struct MediaWaitContext;
 
     [[nodiscard]] ProcessResult execute(const std::vector<std::string>& command,
                                         std::chrono::milliseconds timeout = std::chrono::seconds{4},
@@ -53,6 +56,16 @@ private:
                                        std::string_view action,
                                        std::chrono::seconds timeout = std::chrono::seconds{4});
     [[nodiscard]] std::vector<BluetoothDevice> listDevices(std::optional<std::string> filter);
+    [[nodiscard]] std::optional<BluetoothMediaState> probeMediaState(
+        std::string_view mac, std::chrono::steady_clock::time_point deadline);
+    [[nodiscard]] std::optional<BluetoothMediaState> waitForMediaProfiles(
+        std::string_view mac, std::chrono::steady_clock::time_point windowDeadline,
+        std::chrono::steady_clock::time_point overallDeadline,
+        std::chrono::steady_clock::time_point startedAt, MediaWaitContext& context);
+    [[nodiscard]] static std::string formatMediaState(const BluetoothMediaState& state);
+    void logMediaReady(std::string_view mac, const BluetoothMediaState& state,
+                       std::chrono::steady_clock::time_point startedAt) const;
+    void log(LogLevel level, std::string_view message) const;
 
     BluetoothConfig config_;
     std::shared_ptr<IProcessRunner> processRunner_;

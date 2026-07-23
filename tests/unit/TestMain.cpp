@@ -10,11 +10,13 @@
 #include "x308/SystemStatusService.hpp"
 #include "x308/InteractiveMenu.hpp"
 #include "x308/LinuxAudioOutputController.hpp"
+#include "x308/Logger.hpp"
 
 #include <iostream>
 #include <chrono>
 #include <deque>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <memory>
 #include <sstream>
@@ -33,6 +35,8 @@ public:
     std::vector<std::string> arguments;
     std::chrono::milliseconds timeout{0};
     std::deque<x308::ProcessResult> scriptedResults;
+    std::function<x308::ProcessResult(
+        std::string_view, const std::vector<std::string>&, std::chrono::milliseconds)> handler;
     std::vector<std::vector<std::string>> invocations;
     std::vector<std::chrono::milliseconds> requestedTimeouts;
     x308::ProcessResult run(std::string_view value, const std::vector<std::string>& args,
@@ -42,6 +46,7 @@ public:
         timeout = requestedTimeout;
         invocations.push_back(args);
         requestedTimeouts.push_back(requestedTimeout);
+        if (handler) return handler(value, args, requestedTimeout);
         if (!scriptedResults.empty()) {
             auto result = scriptedResults.front();
             scriptedResults.pop_front();
@@ -330,6 +335,20 @@ void testBluetoothTimeoutIsReported() {
            "process timeout is converted to module error");
 }
 
+void testBluetoothConnectionInProgressRecognition() {
+    expect(x308::BluetoothCtlManager::isConnectionInProgress(
+               {1, false, "Attempting to connect",
+                "Failed: ORG.BLUEZ.ERROR.INPROGRESS BR-CONNECTION-BUSY"}),
+           "InProgress and br-connection-busy are recognized case-insensitively");
+    expect(!x308::BluetoothCtlManager::isConnectionInProgress(
+               {1, false, {}, "org.bluez.Error.NotAvailable"}) &&
+               !x308::BluetoothCtlManager::isConnectionInProgress(
+                   {1, false, {}, "org.bluez.Error.AuthenticationFailed"}) &&
+               !x308::BluetoothCtlManager::isConnectionInProgress(
+                   {1, false, {}, "org.bluez.Error.Failed"}),
+           "permanent BlueZ failures are not classified as InProgress");
+}
+
 void testBluetoothStatusUsesBoundedReadOnlyProbe() {
     auto runner = std::make_shared<FakeProcessRunner>();
     runner->nextResult.exitCode = 0;
@@ -344,6 +363,57 @@ void testBluetoothStatusUsesBoundedReadOnlyProbe() {
            "Bluetooth status process has a 100 ms hard timeout");
 }
 
+std::string bluezBaseConnectionSnapshot(const std::string_view address) {
+    return std::string{R"json({"type":"a{oa{sa{sv}}}","data":[{
+        "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF":{
+            "org.bluez.Device1":{
+                "Address":{"type":"s","data":")json"} + std::string{address} +
+           R"json("},"Connected":{"type":"b","data":true}}}
+    }]})json";
+}
+
+std::string bluezA2dpTransportSnapshot(const std::string_view address) {
+    return std::string{R"json({"type":"a{oa{sa{sv}}}","data":[{
+        "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF":{
+            "org.bluez.Device1":{
+                "Address":{"type":"s","data":")json"} + std::string{address} +
+           R"json("},"Connected":{"type":"b","data":true}}},
+        "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF/fd0":{
+            "org.bluez.MediaTransport1":{
+                "Device":{"type":"o","data":"/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF"},
+                "Codec":{"type":"y","data":0}}}
+    }]})json";
+}
+
+std::string bluezMediaControlSnapshot(const std::string_view address,
+                                      const bool connected) {
+    return std::string{R"json({"type":"a{oa{sa{sv}}}","data":[{
+        "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF":{
+            "org.bluez.Device1":{
+                "Address":{"type":"s","data":")json"} + std::string{address} +
+           R"json("},"Connected":{"type":"b","data":true}},
+            "org.bluez.MediaControl1":{
+                "Connected":{"type":"b","data":)json" +
+           (connected ? "true" : "false") + R"json(}}}
+    }]})json";
+}
+
+std::string bluezOtherDeviceTransportSnapshot() {
+    return R"json({"type":"a{oa{sa{sv}}}","data":[{
+        "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF":{
+            "org.bluez.Device1":{
+                "Address":{"type":"s","data":"AA:BB:CC:DD:EE:FF"},
+                "Connected":{"type":"b","data":true}}},
+        "/org/bluez/hci0/dev_11_22_33_44_55_66":{
+            "org.bluez.Device1":{
+                "Address":{"type":"s","data":"11:22:33:44:55:66"},
+                "Connected":{"type":"b","data":true}}},
+        "/org/bluez/hci0/dev_11_22_33_44_55_66/fd0":{
+            "org.bluez.MediaTransport1":{
+                "Device":{"type":"o","data":"/org/bluez/hci0/dev_11_22_33_44_55_66"}}}
+    }]})json";
+}
+
 void testBluetoothAutoConnectTriesTrustedDevicesInOrder() {
     auto runner = std::make_shared<FakeProcessRunner>();
     runner->scriptedResults.push_back({
@@ -352,20 +422,224 @@ void testBluetoothAutoConnectTriesTrustedDevicesInOrder() {
         "Device 00:00:00:00:00:02 Second Phone\n", {}});
     runner->scriptedResults.push_back({1, false, "Failed to connect", {}});
     runner->scriptedResults.push_back({0, false, "Connection successful", {}});
+    runner->scriptedResults.push_back(
+        {0, false, bluezA2dpTransportSnapshot("00:00:00:00:00:02"), {}});
     x308::BluetoothCtlManager manager{x308::BluetoothConfig{}, runner};
 
     const auto result = manager.autoConnect();
     expect(result.success, "auto-connect succeeds with the first reachable trusted device");
-    expect(runner->invocations.size() == 3 &&
+    expect(runner->invocations.size() == 4 &&
            runner->invocations[0] == std::vector<std::string>({"devices", "Trusted"}) &&
            runner->invocations[1] ==
                std::vector<std::string>({"connect", "00:00:00:00:00:01"}) &&
            runner->invocations[2] ==
-               std::vector<std::string>({"connect", "00:00:00:00:00:02"}),
+               std::vector<std::string>({"connect", "00:00:00:00:00:02"}) &&
+           runner->invocations[3] == std::vector<std::string>({
+               "--system", "--json=short", "call", "org.bluez", "/",
+               "org.freedesktop.DBus.ObjectManager", "GetManagedObjects"}),
            "auto-connect attempts trusted devices in deterministic order");
-    expect(runner->requestedTimeouts[1] == std::chrono::seconds{5} &&
-           runner->requestedTimeouts[2] == std::chrono::seconds{5},
+    expect(runner->requestedTimeouts[1] <= std::chrono::seconds{5} &&
+           runner->requestedTimeouts[2] <= std::chrono::seconds{5} &&
+           runner->requestedTimeouts[3] <= std::chrono::milliseconds{800},
            "each auto-connect attempt has a hard five-second process timeout");
+}
+
+void testBluetoothAutoConnectWaitsForFirstConnectionMediaProfile() {
+    auto runner = std::make_shared<FakeProcessRunner>();
+    constexpr std::string_view phone = "AA:BB:CC:DD:EE:FF";
+    int connectCalls = 0;
+    int mediaProbes = 0;
+    runner->handler = [&](const std::string_view executable,
+                          const std::vector<std::string>& arguments,
+                          const std::chrono::milliseconds) {
+        if (executable == "bluetoothctl" &&
+            arguments == std::vector<std::string>({"devices", "Trusted"})) {
+            return x308::ProcessResult{0, false,
+                                       "Device AA:BB:CC:DD:EE:FF Test iPhone\n", {}};
+        }
+        if (executable == "bluetoothctl" && arguments.size() == 2 &&
+            arguments.front() == "connect") {
+            ++connectCalls;
+            return x308::ProcessResult{0, false, "Connection successful", {}};
+        }
+        if (executable == "busctl") {
+            ++mediaProbes;
+            return x308::ProcessResult{
+                0, false,
+                mediaProbes >= 2 ? bluezA2dpTransportSnapshot(phone)
+                                 : bluezBaseConnectionSnapshot(phone),
+                {}};
+        }
+        return x308::ProcessResult{1, false, {}, "unexpected test command"};
+    };
+    x308::BluetoothConfig config;
+    config.autoConnectTimeoutSeconds = 3;
+    config.mediaDbusTimeoutMilliseconds = 25;
+    x308::BluetoothCtlManager manager{config, runner};
+
+    const auto result = manager.autoConnect();
+    expect(result.success && result.message.find("A2DP ready") != std::string::npos,
+           "media profile appearing during the initial wait completes auto-connect");
+    expect(connectCalls == 1,
+           "a media profile from the first connection avoids a redundant connect retry");
+    expect(mediaProbes >= 2, "A2DP readiness is polled between connection attempts");
+}
+
+void testBluetoothAutoConnectTreatsInProgressAsTransient() {
+    auto runner = std::make_shared<FakeProcessRunner>();
+    constexpr std::string_view phone = "AA:BB:CC:DD:EE:FF";
+    int connectCalls = 0;
+    std::ostringstream logs;
+    auto* previousLogBuffer = std::clog.rdbuf(logs.rdbuf());
+    runner->handler = [&](const std::string_view executable,
+                          const std::vector<std::string>& arguments,
+                          const std::chrono::milliseconds) {
+        if (executable == "bluetoothctl" && arguments.front() == "devices") {
+            return x308::ProcessResult{0, false,
+                                       "Device AA:BB:CC:DD:EE:FF Test iPhone\n", {}};
+        }
+        if (executable == "bluetoothctl" && arguments.front() == "connect") {
+            ++connectCalls;
+            if (connectCalls == 2) {
+                return x308::ProcessResult{
+                    1, false, "Attempting to connect\n",
+                    "Failed to connect: org.bluez.Error.InProgress br-connection-busy"};
+            }
+            return x308::ProcessResult{0, false, "Connection successful", {}};
+        }
+        return x308::ProcessResult{
+            0, false,
+            connectCalls >= 2 ? bluezA2dpTransportSnapshot(phone)
+                              : bluezBaseConnectionSnapshot(phone),
+            {}};
+    };
+    x308::BluetoothConfig config;
+    config.autoConnectTimeoutSeconds = 4;
+    config.mediaDbusTimeoutMilliseconds = 20;
+    x308::Logger logger{"debug"};
+    x308::BluetoothCtlManager manager{config, runner, &logger};
+
+    const auto result = manager.autoConnect();
+    std::clog.rdbuf(previousLogBuffer);
+    expect(result.success && connectCalls == 2,
+           "InProgress retry continues polling until MediaTransport1 appears");
+    expect(logs.str().find("connection still in progress") != std::string::npos &&
+               logs.str().find("media-profile retry failed") == std::string::npos,
+           "InProgress is logged as a transient state rather than a warning");
+}
+
+void testBluetoothAutoConnectRetriesAgainAfterInProgressCooldown() {
+    auto runner = std::make_shared<FakeProcessRunner>();
+    constexpr std::string_view phone = "AA:BB:CC:DD:EE:FF";
+    int connectCalls = 0;
+    std::vector<std::chrono::steady_clock::time_point> connectTimes;
+    runner->handler = [&](const std::string_view executable,
+                          const std::vector<std::string>& arguments,
+                          const std::chrono::milliseconds) {
+        if (executable == "bluetoothctl" && arguments.front() == "devices") {
+            return x308::ProcessResult{0, false,
+                                       "Device AA:BB:CC:DD:EE:FF Test iPhone\n", {}};
+        }
+        if (executable == "bluetoothctl" && arguments.front() == "connect") {
+            ++connectCalls;
+            connectTimes.push_back(std::chrono::steady_clock::now());
+            if (connectCalls == 2) {
+                return x308::ProcessResult{
+                    1, false, {}, "ORG.BLUEZ.ERROR.INPROGRESS BR-CONNECTION-BUSY"};
+            }
+            return x308::ProcessResult{0, false, "Connection successful", {}};
+        }
+        return x308::ProcessResult{
+            0, false,
+            connectCalls >= 3 ? bluezMediaControlSnapshot(phone, true)
+                              : bluezMediaControlSnapshot(phone, false),
+            {}};
+    };
+    x308::BluetoothConfig config;
+    config.autoConnectTimeoutSeconds = 5;
+    config.mediaDbusTimeoutMilliseconds = 20;
+    x308::BluetoothCtlManager manager{config, runner};
+
+    const auto result = manager.autoConnect();
+    expect(result.success && connectCalls == 3,
+           "a second retry is allowed only after the InProgress cooldown");
+    expect(connectTimes.size() == 3 &&
+               connectTimes[2] - connectTimes[1] >= std::chrono::milliseconds{450},
+           "InProgress enforces a cooldown before another connect command");
+    expect(result.message.find("A2DP ready") != std::string::npos,
+           "MediaControl1.Connected completes auto-connect after the later retry");
+}
+
+void testBluetoothAutoConnectPreservesPermanentRetryError() {
+    auto runner = std::make_shared<FakeProcessRunner>();
+    int connectCalls = 0;
+    runner->handler = [&](const std::string_view executable,
+                          const std::vector<std::string>& arguments,
+                          const std::chrono::milliseconds) {
+        if (executable == "bluetoothctl" && arguments.front() == "devices") {
+            return x308::ProcessResult{0, false,
+                                       "Device AA:BB:CC:DD:EE:FF Test iPhone\n", {}};
+        }
+        if (executable == "bluetoothctl" && arguments.front() == "connect") {
+            ++connectCalls;
+            if (connectCalls == 2) {
+                return x308::ProcessResult{
+                    1, false, {}, "Failed to connect: org.bluez.Error.NotAvailable"};
+            }
+            return x308::ProcessResult{0, false, "Connection successful", {}};
+        }
+        return x308::ProcessResult{
+            0, false, bluezBaseConnectionSnapshot("AA:BB:CC:DD:EE:FF"), {}};
+    };
+    x308::BluetoothConfig config;
+    config.autoConnectTimeoutSeconds = 3;
+    config.mediaDbusTimeoutMilliseconds = 20;
+    x308::BluetoothCtlManager manager{config, runner};
+
+    const auto result = manager.autoConnect();
+    expect(!result.success && result.message.find("NotAvailable") != std::string::npos,
+           "a permanent retry error remains the final diagnostic");
+    expect(connectCalls == 2,
+           "a permanent BlueZ error stops retries for the current candidate");
+}
+
+void testBluetoothAutoConnectHonorsOverallTimeout() {
+    auto runner = std::make_shared<FakeProcessRunner>();
+    constexpr std::string_view phone = "AA:BB:CC:DD:EE:FF";
+    std::ostringstream logs;
+    auto* previousLogBuffer = std::clog.rdbuf(logs.rdbuf());
+    runner->handler = [&](const std::string_view executable,
+                          const std::vector<std::string>& arguments,
+                          const std::chrono::milliseconds) {
+        if (executable == "bluetoothctl" && arguments.front() == "devices") {
+            return x308::ProcessResult{0, false,
+                                       "Device AA:BB:CC:DD:EE:FF Test iPhone\n", {}};
+        }
+        if (executable == "bluetoothctl") {
+            return x308::ProcessResult{0, false, "Connection successful", {}};
+        }
+        return x308::ProcessResult{0, false, bluezMediaControlSnapshot(phone, false), {}};
+    };
+    x308::BluetoothConfig config;
+    config.autoConnectTimeoutSeconds = 1;
+    config.mediaDbusTimeoutMilliseconds = 20;
+    x308::Logger logger{"debug"};
+    x308::BluetoothCtlManager manager{config, runner, &logger};
+
+    const auto started = std::chrono::steady_clock::now();
+    const auto result = manager.autoConnect();
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    std::clog.rdbuf(previousLogBuffer);
+    const std::string expectedState =
+        "deviceConnected=true, mediaControlPresent=true, "
+        "mediaControlConnected=false, mediaTransportPresent=false";
+    expect(!result.success && result.message.find("timeout") != std::string::npos &&
+               result.message.find(expectedState) != std::string::npos,
+           "timeout error includes the last known BlueZ media state");
+    expect(logs.str().find(expectedState) != std::string::npos,
+           "timeout log includes the last known BlueZ media state");
+    expect(elapsed < std::chrono::milliseconds{1300},
+           "all media polling stays inside the configured overall deadline");
 }
 
 std::string bluezMediaSnapshot() {
@@ -403,6 +677,28 @@ void testBluezDbusPropertyAndMetadataParsing() {
            "BlueZ Track metadata dictionary is parsed without D-Bus types in the model");
     expect(status.durationMilliseconds == 245000U && status.positionMilliseconds == 42000U,
            "BlueZ duration and playback position are parsed");
+    expect(x308::BluezDbusMediaController::isA2dpReady(
+               bluezA2dpTransportSnapshot("AA:BB:CC:DD:EE:FF"),
+               "aa:bb:cc:dd:ee:ff"),
+           "MediaTransport1 is associated with its device address");
+    expect(x308::BluezDbusMediaController::isA2dpReady(
+               bluezMediaSnapshot(), "AA:BB:CC:DD:EE:FF"),
+           "MediaControl1.Connected is accepted as A2DP readiness");
+    expect(!x308::BluezDbusMediaController::isA2dpReady(
+               bluezBaseConnectionSnapshot("AA:BB:CC:DD:EE:FF"),
+               "AA:BB:CC:DD:EE:FF"),
+           "Device1.Connected alone is not treated as A2DP readiness");
+    const auto controlState = x308::BluezDbusMediaController::parseMediaState(
+        bluezMediaControlSnapshot("AA:BB:CC:DD:EE:FF", false),
+        "AA:BB:CC:DD:EE:FF");
+    expect(controlState.deviceConnected && controlState.mediaControlPresent &&
+               !controlState.mediaControlConnected && !controlState.mediaTransportPresent,
+           "diagnostic media state distinguishes base, control, and transport readiness");
+    const auto otherDeviceState = x308::BluezDbusMediaController::parseMediaState(
+        bluezOtherDeviceTransportSnapshot(), "AA:BB:CC:DD:EE:FF");
+    expect(otherDeviceState.deviceConnected && !otherDeviceState.mediaTransportPresent &&
+               !otherDeviceState.ready(),
+           "MediaTransport1 belonging to another MAC does not mark this device ready");
 }
 
 void testBluezDbusHandlesAbsentMediaPlayer() {
@@ -777,8 +1073,14 @@ int main() {
     testBluetoothUsesSeparatedArgumentsAndRejectsInvalidMac();
     testFirstAvailableTrustedDevice();
     testBluetoothTimeoutIsReported();
+    testBluetoothConnectionInProgressRecognition();
     testBluetoothStatusUsesBoundedReadOnlyProbe();
     testBluetoothAutoConnectTriesTrustedDevicesInOrder();
+    testBluetoothAutoConnectWaitsForFirstConnectionMediaProfile();
+    testBluetoothAutoConnectTreatsInProgressAsTransient();
+    testBluetoothAutoConnectRetriesAgainAfterInProgressCooldown();
+    testBluetoothAutoConnectPreservesPermanentRetryError();
+    testBluetoothAutoConnectHonorsOverallTimeout();
     testBluezDbusPropertyAndMetadataParsing();
     testBluezDbusHandlesAbsentMediaPlayer();
     testBluezDbusPlaybackCommandDispatch();

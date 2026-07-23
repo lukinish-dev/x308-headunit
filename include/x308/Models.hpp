@@ -78,4 +78,17 @@ struct BluetoothMediaStatus {
     std::string error;
 };
 
+struct BluetoothMediaState {
+    bool deviceConnected{false};
+    bool mediaControlPresent{false};
+    bool mediaControlConnected{false};
+    bool mediaTransportPresent{false};
+
+    [[nodiscard]] bool ready() const {
+        return mediaTransportPresent || mediaControlConnected;
+    }
+
+    bool operator==(const BluetoothMediaState&) const = default;
+};
+
 }  // namespace x308

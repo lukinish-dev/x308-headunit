@@ -212,6 +212,14 @@ bool boolProperty(const JsonValue::Object* properties, const std::string_view pr
     return boolean != nullptr && *boolean;
 }
 
+bool equalAddress(const std::string_view left, const std::string_view right) {
+    return left.size() == right.size() &&
+           std::equal(left.begin(), left.end(), right.begin(), [](const char lhs, const char rhs) {
+               return std::tolower(static_cast<unsigned char>(lhs)) ==
+                      std::tolower(static_cast<unsigned char>(rhs));
+           });
+}
+
 std::optional<std::uint64_t> unsignedProperty(const JsonValue::Object* properties,
                                               const std::string_view propertyName) {
     const auto* value = propertyData(properties, propertyName);
@@ -331,6 +339,57 @@ BluetoothMediaStatus BluezDbusMediaController::parseManagedObjects(const std::st
         result.error = std::string{"Cannot parse BlueZ ObjectManager response: "} + error.what();
     }
     return result;
+}
+
+BluetoothMediaState BluezDbusMediaController::parseMediaState(
+    const std::string_view json, const std::string_view deviceAddress) {
+    BluetoothMediaState result;
+    try {
+        const auto root = JsonParser{json}.parse();
+        const auto* data = asArray(member(asObject(&root), "data"));
+        if (data == nullptr || data->empty()) return result;
+        const auto* objects = asObject(&data->front());
+        if (objects == nullptr) return result;
+
+        std::string devicePath;
+        for (const auto& [path, interfaces] : *objects) {
+            const auto* device = interfaceProperties(interfaces, "org.bluez.Device1");
+            if (device != nullptr &&
+                equalAddress(stringProperty(device, "Address"), deviceAddress)) {
+                devicePath = path;
+                result.deviceConnected = boolProperty(device, "Connected");
+                break;
+            }
+        }
+        if (devicePath.empty()) return result;
+
+        const auto deviceObject = objects->find(devicePath);
+        if (deviceObject != objects->end()) {
+            const auto* control =
+                interfaceProperties(deviceObject->second, "org.bluez.MediaControl1");
+            result.mediaControlPresent = control != nullptr;
+            result.mediaControlConnected = boolProperty(control, "Connected");
+        }
+
+        for (const auto& [path, interfaces] : *objects) {
+            const auto* transport =
+                interfaceProperties(interfaces, "org.bluez.MediaTransport1");
+            if (transport == nullptr) continue;
+            const auto transportDevice = stringProperty(transport, "Device");
+            if (transportDevice == devicePath || path.starts_with(devicePath + '/')) {
+                result.mediaTransportPresent = true;
+                break;
+            }
+        }
+    } catch (const std::exception&) {
+        return {};
+    }
+    return result;
+}
+
+bool BluezDbusMediaController::isA2dpReady(const std::string_view json,
+                                           const std::string_view deviceAddress) {
+    return parseMediaState(json, deviceAddress).ready();
 }
 
 Result BluezDbusMediaController::invokeOnPlayer(const std::string_view playerPath,

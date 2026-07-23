@@ -23,6 +23,10 @@ public:
     [[nodiscard]] Result previous() override;
 
     [[nodiscard]] static BluetoothMediaStatus parseManagedObjects(std::string_view json);
+    [[nodiscard]] static BluetoothMediaState parseMediaState(
+        std::string_view json, std::string_view deviceAddress);
+    [[nodiscard]] static bool isA2dpReady(std::string_view json,
+                                          std::string_view deviceAddress);
 
 private:
     [[nodiscard]] Result invoke(std::string_view method);
