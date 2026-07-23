@@ -66,7 +66,8 @@ private:
         std::optional<PlaybackState> expectedState = std::nullopt,
         std::string_view previousUri = {}, bool requireTrackChange = false,
         bool advanceAutomaticFolderOnStop = false,
-        bool metadataFailureIsWarning = false);
+        bool metadataFailureIsWarning = false,
+        unsigned statusTimeoutMilliseconds = 1500);
     void monitorAutomaticPlayback(std::stop_token stopToken);
     void logInfo(std::string_view message) const;
     void logWarning(std::string_view message) const;

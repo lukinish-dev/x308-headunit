@@ -32,6 +32,17 @@ constexpr unsigned backgroundStatusTimeoutMilliseconds = 400;
 constexpr auto transitionInitialDelay = std::chrono::milliseconds{150};
 constexpr auto transitionRetryInterval = std::chrono::milliseconds{150};
 constexpr auto transitionRetryWindow = std::chrono::seconds{3};
+constexpr unsigned playbackStatusTimeoutMilliseconds = 500;
+
+std::string_view playbackStateName(const PlaybackState state) {
+    switch (state) {
+        case PlaybackState::stopped: return "stop";
+        case PlaybackState::paused: return "pause";
+        case PlaybackState::playing: return "playing";
+        case PlaybackState::unknown: return "unknown";
+    }
+    return "unknown";
+}
 
 std::string connectionError(const mpd_connection* connection,
                             const std::string_view operation) {
@@ -194,6 +205,7 @@ X308_MPD_COMMAND(togglePause, mpd_run_toggle_pause(connection.get()), "Toggle pa
 
 Result MpdClient::play() {
     const std::lock_guard lock(mutex_);
+    logInfo("MPD playback request started");
     const auto current = statusLocked(500);
     if (current.available && current.state == PlaybackState::paused) {
         auto connection = connect(config_, timeoutMilliseconds_, lastError_);
@@ -202,9 +214,11 @@ Result MpdClient::play() {
             connection.get(), mpd_run_play(connection.get()), lastError_, "Resume");
         if (!result.success) return result;
         connection.reset();
+        logInfo("MPD play command sent");
         return waitForTrackAfterCommandLocked(
             "Воспроизведение продолжено.", "Сейчас играет",
-            PlaybackState::playing);
+            PlaybackState::playing, {}, false, false, false,
+            playbackStatusTimeoutMilliseconds);
     }
 
     if (!manualSelectionMade_) {
@@ -236,15 +250,18 @@ Result MpdClient::pause() {
 
 Result MpdClient::resume() {
     const std::lock_guard lock(mutex_);
+    logInfo("MPD playback request started");
     auto connection = connect(config_, timeoutMilliseconds_, lastError_);
     if (!connection) return Result::error(lastError_);
     const auto result = commandResult(
         connection.get(), mpd_run_play(connection.get()), lastError_, "Resume");
     if (!result.success) return result;
+    logInfo("MPD play command sent");
     connection.reset();
     return waitForTrackAfterCommandLocked(
         "Воспроизведение продолжено.", "Сейчас играет",
-        PlaybackState::playing);
+        PlaybackState::playing, {}, false, false, false,
+        playbackStatusTimeoutMilliseconds);
 }
 
 Result MpdClient::stop() {
@@ -575,6 +592,7 @@ Result MpdClient::startFolderLocked(const std::string_view folder,
     const auto mode = automatic ? "automatic" : "manual";
     logInfo("MPD " + std::string{mode} + " folder playback started: " +
             std::string{folder} + ", track index " + std::to_string(selectedPosition));
+    logInfo("MPD play command sent");
     return verifyPlaybackLocked();
 }
 
@@ -598,7 +616,8 @@ Result MpdClient::startRandomFolderLocked() {
 Result MpdClient::verifyPlaybackLocked() {
     return waitForTrackAfterCommandLocked(
         "Воспроизведение успешно запущено.", "Сейчас играет",
-        PlaybackState::playing);
+        PlaybackState::playing, {}, false, false, false,
+        playbackStatusTimeoutMilliseconds);
 }
 
 Result MpdClient::waitForTrackAfterCommandLocked(
@@ -606,14 +625,25 @@ Result MpdClient::waitForTrackAfterCommandLocked(
     const std::optional<PlaybackState> expectedState,
     const std::string_view previousUri, const bool requireTrackChange,
     const bool advanceAutomaticFolderOnStop,
-    const bool metadataFailureIsWarning) {
+    const bool metadataFailureIsWarning,
+    const unsigned statusTimeoutMilliseconds) {
     const auto deadline = std::chrono::steady_clock::now() + transitionRetryWindow;
+    const auto waitStarted = std::chrono::steady_clock::now();
+    const bool confirmingPlayback = expectedState == PlaybackState::playing;
     MediaStatus lastStatus;
     std::optional<MediaStatus> lastAvailableStatus;
     std::this_thread::sleep_for(transitionInitialDelay);
 
     while (true) {
-        lastStatus = statusLocked(transitionTransactionTimeoutMilliseconds);
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now());
+        if (remaining <= std::chrono::milliseconds::zero()) break;
+        const auto remainingMilliseconds = std::max(
+            1U, static_cast<unsigned>(remaining.count()));
+        lastStatus = statusLocked(std::min(statusTimeoutMilliseconds, remainingMilliseconds));
+        if (confirmingPlayback && lastStatus.available) {
+            logInfo("MPD state: " + std::string{playbackStateName(lastStatus.state)});
+        }
         if (lastStatus.available) lastAvailableStatus = lastStatus;
         if (advanceAutomaticFolderOnStop && lastStatus.available &&
             lastStatus.state == PlaybackState::stopped) {
@@ -626,6 +656,11 @@ Result MpdClient::waitForTrackAfterCommandLocked(
             (!requireTrackChange || lastStatus.currentTrack->uri != previousUri);
         if (lastStatus.available && stateMatches && trackMatches) {
             lastError_.clear();
+            if (confirmingPlayback) {
+                const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - waitStarted);
+                logInfo("MPD playback confirmed after " + std::to_string(elapsed.count()) + " ms");
+            }
             return Result::ok(std::string{completedMessage} + "\n" +
                               std::string{trackLabel} + ": " +
                               trackSummary(*lastStatus.currentTrack));
@@ -672,6 +707,11 @@ Result MpdClient::waitForTrackAfterCommandLocked(
     }
 
     lastError_ = "MPD playback state did not reach the expected value";
+    if (confirmingPlayback) {
+        logWarning("MPD playback timeout: last state=" +
+                   std::string{lastStatus.available ? playbackStateName(lastStatus.state) : "unavailable"} +
+                   ", play command sent=true, audio preparation completed=true");
+    }
     return warning("Состояние воспроизведения не обновилось за 3 с.");
 }
 
