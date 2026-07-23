@@ -22,6 +22,7 @@ public:
 
 private:
     [[nodiscard]] int runMpdMenu(std::istream& input, std::ostream& output) const;
+    [[nodiscard]] int runMpdLibraryBrowser(std::istream& input, std::ostream& output) const;
     [[nodiscard]] int runBluetoothMenu(std::istream& input, std::ostream& output) const;
     [[nodiscard]] int runSourceMenu(std::istream& input, std::ostream& output) const;
     IMediaPlayer* mediaPlayer_;

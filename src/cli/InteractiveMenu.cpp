@@ -5,8 +5,13 @@
 #include "x308/SystemStatusPresenter.hpp"
 #include "x308/SystemStatusService.hpp"
 
+#include <algorithm>
+#include <charconv>
+#include <iomanip>
 #include <istream>
+#include <optional>
 #include <ostream>
+#include <sstream>
 #include <string>
 
 namespace x308 {
@@ -24,8 +29,40 @@ std::string_view playbackName(const PlaybackState state) {
 }
 
 void showResult(std::ostream& output, const Result& result) {
-    if (result.success) output << "Готово: операция выполнена.\n";
+    if (result.success) {
+        output << (result.message.empty() ? "Операция выполнена." : result.message) << '\n';
+    }
     else output << "Ошибка: " << result.message << '\n';
+}
+
+std::optional<std::size_t> menuNumber(const std::string& value) {
+    std::size_t number = 0;
+    const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), number);
+    if (error != std::errc{} || end != value.data() + value.size()) return std::nullopt;
+    return number;
+}
+
+std::string entryName(const std::string_view path) {
+    const auto separator = path.rfind('/');
+    return std::string{separator == std::string_view::npos ? path : path.substr(separator + 1)};
+}
+
+std::string parentFolder(const std::string_view path) {
+    const auto separator = path.rfind('/');
+    return separator == std::string_view::npos ? std::string{} : std::string{path.substr(0, separator)};
+}
+
+std::string elapsedTime(const std::optional<std::uint64_t> milliseconds) {
+    if (!milliseconds.has_value()) return "—";
+    const auto totalSeconds = *milliseconds / 1000;
+    const auto hours = totalSeconds / 3600;
+    const auto minutes = (totalSeconds % 3600) / 60;
+    const auto seconds = totalSeconds % 60;
+    std::ostringstream value;
+    if (hours > 0) value << hours << ':';
+    value << std::setfill('0') << std::setw(2) << minutes
+          << ':' << std::setw(2) << seconds;
+    return value.str();
 }
 
 }  // namespace
@@ -174,58 +211,105 @@ int InteractiveMenu::runMpdMenu(std::istream& input, std::ostream& output) const
     std::string selection;
     while (true) {
         output << "\n--- MPD ---\n"
-               << "1. Состояние и текущий трек\n2. Воспроизвести\n3. Пауза\n"
-               << "4. Пауза/продолжить\n5. Стоп\n6. Следующий трек\n"
-               << "7. Предыдущий трек\n8. Очередь\n9. Очистить очередь\n"
-               << "10. Библиотека\n11. Добавить трек\n12. Добавить папку\n"
-               << "13. Random: on\n14. Random: off\n15. Repeat: on\n"
-               << "16. Repeat: off\n17. Обновить базу\n0. Назад\n\n> " << std::flush;
+               << "1. Play\n"
+               << "2. Пауза\n"
+               << "3. Продолжить\n"
+               << "4. Стоп\n"
+               << "5. Следующий трек\n"
+               << "6. Предыдущий трек\n"
+               << "7. Обзор библиотеки\n"
+               << "8. Текущее состояние\n"
+               << "9. Обновить библиотеку\n"
+               << "0. Назад\n\n> " << std::flush;
         if (!std::getline(input, selection) || selection == "0") return 0;
-        if (selection == "1") {
+        if (selection == "1") showResult(output, mediaPlayer_->play());
+        else if (selection == "2") showResult(output, mediaPlayer_->pause());
+        else if (selection == "3") showResult(output, mediaPlayer_->resume());
+        else if (selection == "4") showResult(output, mediaPlayer_->stop());
+        else if (selection == "5") showResult(output, mediaPlayer_->next());
+        else if (selection == "6") showResult(output, mediaPlayer_->previous());
+        else if (selection == "7") {
+            static_cast<void>(runMpdLibraryBrowser(input, output));
+        } else if (selection == "8") {
             const auto status = mediaPlayer_->status();
             if (!status.available) {
-                output << "MPD недоступен: " << status.error << '\n';
+                output << "Подключение к MPD: недоступно\n"
+                       << "Диагностика: " << status.error << '\n';
             } else {
-                output << "Состояние: " << playbackName(status.state) << '\n';
+                output << "Подключение к MPD: установлено\n"
+                       << "Состояние: " << playbackName(status.state) << '\n';
                 if (status.currentTrack.has_value()) {
                     const auto& track = *status.currentTrack;
-                    output << "Трек: " << (track.title.empty() ? track.uri : track.title) << '\n'
-                           << "Исполнитель: " << (track.artist.empty() ? "—" : track.artist) << '\n'
-                           << "Альбом: " << (track.album.empty() ? "—" : track.album) << '\n';
+                    output << "Исполнитель: "
+                           << (track.artist.empty() ? "Неизвестный исполнитель" : track.artist)
+                           << '\n'
+                           << "Альбом: "
+                           << (track.album.empty() ? "Неизвестный альбом" : track.album)
+                           << '\n'
+                           << "Трек: "
+                           << (track.title.empty() ? entryName(track.uri) : track.title)
+                           << '\n'
+                           << "Файл: " << track.uri << '\n';
                 } else {
                     output << "Текущий трек отсутствует.\n";
                 }
+                output << "Прошло: " << elapsedTime(status.elapsedMilliseconds) << '\n';
+                if (!status.error.empty()) {
+                    output << "Диагностика: " << status.error << '\n';
+                }
             }
-        } else if (selection == "2") showResult(output, mediaPlayer_->play());
-        else if (selection == "3") showResult(output, mediaPlayer_->pause());
-        else if (selection == "4") showResult(output, mediaPlayer_->togglePause());
-        else if (selection == "5") showResult(output, mediaPlayer_->stop());
-        else if (selection == "6") showResult(output, mediaPlayer_->next());
-        else if (selection == "7") showResult(output, mediaPlayer_->previous());
-        else if (selection == "8") {
-            const auto queue = mediaPlayer_->queue();
-            if (queue.empty()) output << (mediaPlayer_->lastError().empty() ? "Очередь пуста.\n" : "Ошибка: " + mediaPlayer_->lastError() + "\n");
-            for (const auto& track : queue) output << "- " << (track.title.empty() ? track.uri : track.title) << '\n';
-        } else if (selection == "9") showResult(output, mediaPlayer_->clearQueue());
-        else if (selection == "10") {
-            output << "Путь (пусто — корень): " << std::flush;
-            std::string path;
-            if (!std::getline(input, path)) return 0;
-            const auto entries = mediaPlayer_->library(path);
-            if (entries.empty()) output << (mediaPlayer_->lastError().empty() ? "Папка пуста.\n" : "Ошибка: " + mediaPlayer_->lastError() + "\n");
-            for (const auto& entry : entries) output << (entry.directory ? "[DIR] " : "      ") << entry.path << '\n';
-        } else if (selection == "11" || selection == "12") {
-            output << "Путь в библиотеке MPD: " << std::flush;
-            std::string path;
-            if (!std::getline(input, path)) return 0;
-            showResult(output, selection == "11" ? mediaPlayer_->add(path)
-                                                   : mediaPlayer_->addFolder(path));
-        } else if (selection == "13") showResult(output, mediaPlayer_->setRandom(true));
-        else if (selection == "14") showResult(output, mediaPlayer_->setRandom(false));
-        else if (selection == "15") showResult(output, mediaPlayer_->setRepeat(true));
-        else if (selection == "16") showResult(output, mediaPlayer_->setRepeat(false));
-        else if (selection == "17") showResult(output, mediaPlayer_->update());
+        } else if (selection == "9") showResult(output, mediaPlayer_->update());
         else output << "Неверный пункт меню.\n";
+    }
+}
+
+int InteractiveMenu::runMpdLibraryBrowser(std::istream& input, std::ostream& output) const {
+    std::string currentFolder;
+    while (true) {
+        auto entries = mediaPlayer_->library(currentFolder);
+        std::sort(entries.begin(), entries.end(), [](const LibraryEntry& left,
+                                                     const LibraryEntry& right) {
+            if (left.directory != right.directory) return left.directory > right.directory;
+            return left.path < right.path;
+        });
+
+        output << "\n--- Библиотека MPD ---\n"
+               << "Текущая папка: "
+               << (currentFolder.empty() ? "/" : currentFolder) << "\n\n";
+        if (entries.empty()) {
+            if (const auto error = mediaPlayer_->lastError(); !error.empty()) {
+                output << "Ошибка чтения библиотеки: " << error << '\n';
+            } else {
+                output << "Папка пуста.\n";
+            }
+        }
+        for (std::size_t index = 0; index < entries.size(); ++index) {
+            output << index + 1 << ". "
+                   << (entries[index].directory ? "[Папка] " : "")
+                   << entryName(entries[index].path) << '\n';
+        }
+        output << "0. Назад\n\n> " << std::flush;
+
+        std::string selection;
+        if (!std::getline(input, selection)) return 0;
+        const auto number = menuNumber(selection);
+        if (!number.has_value() || *number > entries.size()) {
+            output << "Неверный номер. Попробуйте снова.\n";
+            continue;
+        }
+        if (*number == 0) {
+            if (currentFolder.empty()) return 0;
+            currentFolder = parentFolder(currentFolder);
+            continue;
+        }
+
+        const auto& selected = entries[*number - 1];
+        if (selected.directory) {
+            currentFolder = selected.path;
+            continue;
+        }
+        showResult(output, mediaPlayer_->playFolder(currentFolder, selected.path));
+        return 0;
     }
 }
 

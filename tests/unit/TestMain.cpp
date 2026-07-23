@@ -12,6 +12,12 @@
 #include "x308/LinuxAudioOutputController.hpp"
 #include "x308/Logger.hpp"
 
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <atomic>
 #include <iostream>
 #include <chrono>
 #include <deque>
@@ -27,6 +33,180 @@
 namespace {
 
 int failures = 0;
+
+class ScriptedMpdServer {
+public:
+    struct Options {
+        bool delayEveryStatus{false};
+        bool delayEveryCurrentSong{false};
+        bool timeoutFirstStatusAfterTransition{false};
+        int staleReadsAfterTransition{0};
+        int initialSong{0};
+    };
+
+    ScriptedMpdServer() : ScriptedMpdServer(Options{}) {}
+
+    explicit ScriptedMpdServer(const Options options)
+        : options_(options),
+          currentSong_(options.initialSong),
+          targetSong_(options.initialSong) {
+        static std::atomic<unsigned> nextId{0};
+        socketPath_ = "/tmp/x308-mpd-unit-" + std::to_string(::getpid()) + "-" +
+                      std::to_string(nextId.fetch_add(1)) + ".sock";
+        listener_ = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        if (listener_ < 0) return;
+        sockaddr_un address{};
+        address.sun_family = AF_UNIX;
+        std::copy(socketPath_.begin(), socketPath_.end(), address.sun_path);
+        address.sun_path[socketPath_.size()] = '\0';
+        if (::bind(listener_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0 ||
+            ::listen(listener_, 4) != 0) {
+            ::close(listener_);
+            listener_ = -1;
+            static_cast<void>(::unlink(socketPath_.c_str()));
+            return;
+        }
+        available_ = true;
+        worker_ = std::jthread([this](const std::stop_token token) { serve(token); });
+    }
+
+    ~ScriptedMpdServer() {
+        worker_.request_stop();
+        const int client = activeClient_.load();
+        if (client >= 0) static_cast<void>(::shutdown(client, SHUT_RDWR));
+        if (listener_ >= 0) {
+            static_cast<void>(::shutdown(listener_, SHUT_RDWR));
+            ::close(listener_);
+            listener_ = -1;
+        }
+        if (worker_.joinable()) worker_.join();
+        static_cast<void>(::unlink(socketPath_.c_str()));
+    }
+
+    ScriptedMpdServer(const ScriptedMpdServer&) = delete;
+    ScriptedMpdServer& operator=(const ScriptedMpdServer&) = delete;
+
+    [[nodiscard]] bool available() const { return available_; }
+    [[nodiscard]] const std::string& host() const { return socketPath_; }
+
+private:
+    static bool sendResponse(const int socket, const std::string_view response) {
+        std::size_t sent = 0;
+        while (sent < response.size()) {
+            const auto count = ::send(
+                socket, response.data() + sent, response.size() - sent, MSG_NOSIGNAL);
+            if (count <= 0) return false;
+            sent += static_cast<std::size_t>(count);
+        }
+        return true;
+    }
+
+    static std::optional<std::string> readLine(const int socket) {
+        std::string line;
+        char character = '\0';
+        while (true) {
+            const auto count = ::recv(socket, &character, 1, 0);
+            if (count <= 0) return std::nullopt;
+            if (character == '\n') return line;
+            if (character != '\r') line.push_back(character);
+        }
+    }
+
+    void serve(const std::stop_token token) {
+        while (!token.stop_requested()) {
+            const int client = ::accept(listener_, nullptr, nullptr);
+            if (client < 0) return;
+            activeClient_.store(client);
+            static_cast<void>(sendResponse(client, "OK MPD 0.23.12\n"));
+            while (!token.stop_requested()) {
+                const auto command = readLine(client);
+                if (!command.has_value()) break;
+                if (*command == "status") {
+                    if (options_.delayEveryStatus) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds{250});
+                    }
+                    if (transitionPending_ &&
+                        options_.timeoutFirstStatusAfterTransition &&
+                        !transitionTimeoutInjected_) {
+                        transitionTimeoutInjected_ = true;
+                        std::this_thread::sleep_for(std::chrono::milliseconds{1700});
+                    }
+                    const auto stateName =
+                        state_ == x308::PlaybackState::paused ? "pause" :
+                        state_ == x308::PlaybackState::stopped ? "stop" : "play";
+                    const std::string response =
+                        "repeat: 0\nrandom: 0\nplaylist: 1\nplaylistlength: 2\n"
+                        "state: " + std::string{stateName} +
+                        "\nelapsed: 42.000\nduration: 200.000\nOK\n";
+                    if (!sendResponse(client, response)) break;
+                } else if (*command == "currentsong") {
+                    if (options_.delayEveryCurrentSong) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds{500});
+                    }
+                    if (transitionPending_) {
+                        if (staleReadsRemaining_ > 0) {
+                            --staleReadsRemaining_;
+                        } else {
+                            currentSong_ = targetSong_;
+                            transitionPending_ = false;
+                        }
+                    }
+                    const auto first = currentSong_ == 0;
+                    const std::string response =
+                        "file: Artist/Album/" + std::string{first ? "01.flac" : "02.flac"} +
+                        "\nArtist: Test Artist\nAlbum: Test Album\nTitle: " +
+                        std::string{first ? "First Song" : "Second Song"} +
+                        "\nPos: " + std::to_string(currentSong_) +
+                        "\nId: " + std::to_string(currentSong_ + 1) + "\nOK\n";
+                    if (!sendResponse(client, response)) break;
+                } else if (*command == "next") {
+                    targetSong_ = 1;
+                    transitionPending_ = true;
+                    transitionTimeoutInjected_ = false;
+                    staleReadsRemaining_ = options_.staleReadsAfterTransition;
+                    if (!sendResponse(client, "OK\n")) break;
+                } else if (*command == "previous") {
+                    targetSong_ = 0;
+                    transitionPending_ = true;
+                    transitionTimeoutInjected_ = false;
+                    staleReadsRemaining_ = options_.staleReadsAfterTransition;
+                    if (!sendResponse(client, "OK\n")) break;
+                } else if (*command == "pause 1") {
+                    state_ = x308::PlaybackState::paused;
+                    if (!sendResponse(client, "OK\n")) break;
+                } else if (*command == "play") {
+                    state_ = x308::PlaybackState::playing;
+                    if (!sendResponse(client, "OK\n")) break;
+                } else if (*command == "stop") {
+                    state_ = x308::PlaybackState::stopped;
+                    if (!sendResponse(client, "OK\n")) break;
+                } else if (command->starts_with("add ")) {
+                    if (!sendResponse(
+                            client, "ACK [50@0] {add} scripted MPD add failure\n")) break;
+                } else {
+                    if (!sendResponse(
+                            client, "ACK [5@0] {} unknown scripted command\n")) break;
+                }
+            }
+            static_cast<void>(::shutdown(client, SHUT_RDWR));
+            ::close(client);
+            activeClient_.store(-1);
+        }
+    }
+
+    Options options_;
+    bool available_{false};
+    int listener_{-1};
+    std::atomic<int> activeClient_{-1};
+    std::string socketPath_;
+    int currentSong_{0};
+    int targetSong_{0};
+    int staleReadsRemaining_{0};
+    bool transitionPending_{false};
+    bool transitionTimeoutInjected_{false};
+    x308::PlaybackState state_{x308::PlaybackState::playing};
+    std::jthread worker_;
+};
 
 class FakeProcessRunner final : public x308::IProcessRunner {
 public:
@@ -61,23 +241,33 @@ public:
     std::vector<std::string>& calls;
     x308::MediaStatus currentStatus;
     std::chrono::milliseconds statusDelay{0};
+    x308::Result playResult{x308::Result::ok()};
     x308::Result pauseResult{x308::Result::ok()};
     x308::Result activateResult{x308::Result::ok()};
     x308::Result releaseResult{x308::Result::ok()};
+    std::function<std::vector<x308::LibraryEntry>(std::string_view)> libraryHandler;
     explicit FakeMediaPlayer(std::vector<std::string>& value) : calls(value) {}
     x308::MediaStatus status() override {
         std::this_thread::sleep_for(statusDelay);
         return currentStatus;
     }
-    x308::Result play() override { calls.emplace_back("mpd.play"); return x308::Result::ok(); }
+    x308::Result play() override { calls.emplace_back("mpd.play"); return playResult; }
     x308::Result pause() override { calls.emplace_back("mpd.pause"); return pauseResult; }
+    x308::Result resume() override { calls.emplace_back("mpd.resume"); return x308::Result::ok(); }
     x308::Result stop() override { calls.emplace_back("mpd.stop"); return x308::Result::ok(); }
     x308::Result togglePause() override { calls.emplace_back("mpd.toggle"); return x308::Result::ok(); }
     x308::Result next() override { calls.emplace_back("mpd.next"); return x308::Result::ok(); }
     x308::Result previous() override { calls.emplace_back("mpd.previous"); return x308::Result::ok(); }
     std::vector<x308::Track> queue() override { return {}; }
     x308::Result clearQueue() override { calls.emplace_back("mpd.clear"); return x308::Result::ok(); }
-    std::vector<x308::LibraryEntry> library(std::string_view) override { return {}; }
+    std::vector<x308::LibraryEntry> library(std::string_view path) override {
+        return libraryHandler ? libraryHandler(path) : std::vector<x308::LibraryEntry>{};
+    }
+    x308::Result playFolder(std::string_view folder, std::string_view selectedTrack) override {
+        calls.emplace_back(
+            "mpd.play-folder:" + std::string{folder} + ":" + std::string{selectedTrack});
+        return x308::Result::ok("started");
+    }
     x308::Result add(std::string_view) override { calls.emplace_back("mpd.add"); return x308::Result::ok(); }
     x308::Result addFolder(std::string_view) override { calls.emplace_back("mpd.add-folder"); return x308::Result::ok(); }
     x308::Result setRandom(bool) override { calls.emplace_back("mpd.random"); return x308::Result::ok(); }
@@ -273,6 +463,215 @@ void testMpdModelConversionHandlesMissingTags() {
     expect(track.title.empty(), "missing title is empty");
     expect(track.artist == "Artist", "MPD artist converted");
     expect(track.album.empty(), "missing album is empty");
+}
+
+void testMpdFindsLeafFoldersAndAvoidsImmediateRepeat() {
+    const auto folders = x308::MpdClient::playableFoldersFromUris({
+        "Loose Track.flac",
+        "Artist/Album/02.flac",
+        "Artist/Album/01.flac",
+        "Artist/Other/01.flac",
+        "Artist/direct.flac",
+        "Solo/only.flac",
+    });
+    expect(folders == std::vector<std::string>({
+               "Artist/Album", "Artist/Other", "Solo"}),
+           "MPD automatic playback uses only unique leaf folders");
+
+    const auto candidates = x308::MpdClient::nextFolderCandidates(
+        folders, "Artist/Other");
+    expect(candidates == std::vector<std::string>({"Artist/Album", "Solo"}),
+           "MPD automatic playback avoids the previous folder");
+    expect(x308::MpdClient::nextFolderCandidates({"Only"}, "Only") ==
+               std::vector<std::string>({"Only"}),
+           "MPD automatic playback permits repeating the only folder");
+}
+
+void testMpdConsumesResponsesAndReadsCurrentTrackAfterCommands() {
+    ScriptedMpdServer server;
+    if (!server.available()) {
+        std::cout << "SKIP: MPD protocol test socket is unavailable\n";
+        return;
+    }
+    x308::MpdConfig config;
+    config.host = server.host();
+    config.port = 0;
+    x308::MpdClient client{config, 500};
+
+    const auto initial = client.status();
+    expect(initial.available && initial.state == x308::PlaybackState::playing,
+           "MPD status response is parsed through its final OK");
+    expect(initial.currentTrack.has_value() &&
+               initial.currentTrack->title == "First Song" &&
+               initial.currentTrack->artist == "Test Artist" &&
+               initial.currentTrack->album == "Test Album" &&
+               initial.currentTrack->uri == "Artist/Album/01.flac",
+           "MPD currentsong metadata response is parsed");
+    expect(initial.elapsedMilliseconds == 42000,
+           "MPD elapsed playback time is parsed");
+
+    const auto next = client.next();
+    expect(next.success && next.message.find("Test Artist — Second Song") != std::string::npos,
+           "MPD Next waits for and reports the newly selected track");
+    const auto afterNext = client.status();
+    expect(afterNext.available && afterNext.currentTrack.has_value() &&
+               afterNext.currentTrack->title == "Second Song",
+           "a completed write command is followed by a synchronized status transaction");
+
+    const auto ack = client.add("reject-this.flac");
+    expect(!ack.success && ack.message.find("MPD ACK error") != std::string::npos &&
+               ack.message.find("scripted MPD add failure") != std::string::npos,
+           "MPD ACK response is preserved as a distinct diagnostic");
+    const auto afterAck = client.status();
+    expect(afterAck.available && afterAck.currentTrack.has_value(),
+           "an ACK on one transaction cannot desynchronize a later operation");
+}
+
+void testMpdReadTimeoutHasSpecificDiagnostic() {
+    ScriptedMpdServer server{
+        ScriptedMpdServer::Options{.delayEveryStatus = true}};
+    if (!server.available()) {
+        std::cout << "SKIP: MPD timeout test socket is unavailable\n";
+        return;
+    }
+    x308::MpdConfig config;
+    config.host = server.host();
+    config.port = 0;
+    x308::MpdClient client{config, 200};
+
+    const auto status = client.status();
+    expect(!status.available &&
+               status.error.find("Read status timed out") != std::string::npos,
+           "MPD status timeout identifies the exact failed operation");
+}
+
+void testMpdCurrentSongTimeoutHasSpecificDiagnostic() {
+    ScriptedMpdServer server{
+        ScriptedMpdServer::Options{.delayEveryCurrentSong = true}};
+    if (!server.available()) {
+        std::cout << "SKIP: MPD currentsong timeout test socket is unavailable\n";
+        return;
+    }
+    x308::MpdConfig config;
+    config.host = server.host();
+    config.port = 0;
+    x308::MpdClient client{config, 200};
+
+    const auto status = client.status();
+    expect(status.available &&
+               status.error.find("Read current song timed out") != std::string::npos,
+           "MPD currentsong timeout is distinguished from a status timeout");
+}
+
+void testMpdNextRetriesStaleMetadataUntilSongChanges() {
+    ScriptedMpdServer server{
+        ScriptedMpdServer::Options{.staleReadsAfterTransition = 3}};
+    if (!server.available()) {
+        std::cout << "SKIP: MPD delayed transition test socket is unavailable\n";
+        return;
+    }
+    x308::MpdConfig config;
+    config.host = server.host();
+    config.port = 0;
+    x308::MpdClient client{config, 2000};
+
+    const auto next = client.next();
+    expect(next.success &&
+               next.message.find("Test Artist — Second Song") != std::string::npos &&
+               next.message.find("First Song") == std::string::npos,
+           "MPD Next retries stale metadata and never prints the previous track");
+}
+
+void testMpdPreviousRetriesStaleMetadataUntilSongChanges() {
+    ScriptedMpdServer server{
+        ScriptedMpdServer::Options{
+            .staleReadsAfterTransition = 2,
+            .initialSong = 1}};
+    if (!server.available()) {
+        std::cout << "SKIP: MPD delayed Previous test socket is unavailable\n";
+        return;
+    }
+    x308::MpdConfig config;
+    config.host = server.host();
+    config.port = 0;
+    x308::MpdClient client{config, 2000};
+
+    const auto previous = client.previous();
+    expect(previous.success &&
+               previous.message.find("Test Artist — First Song") != std::string::npos &&
+               previous.message.find("Second Song") == std::string::npos,
+           "MPD Previous uses the same bounded stale-metadata retry");
+}
+
+void testMpdTransitionRecoversAfterFirstStatusTimeout() {
+    ScriptedMpdServer server{
+        ScriptedMpdServer::Options{.timeoutFirstStatusAfterTransition = true}};
+    if (!server.available()) {
+        std::cout << "SKIP: MPD transition timeout recovery socket is unavailable\n";
+        return;
+    }
+    x308::MpdConfig config;
+    config.host = server.host();
+    config.port = 0;
+    x308::MpdClient client{config, 2000};
+
+    const auto next = client.next();
+    expect(next.success &&
+               next.message.find("Test Artist — Second Song") != std::string::npos,
+           "MPD track transition retries a complete transaction after a status timeout");
+    const auto laterStatus = client.status();
+    expect(laterStatus.available && laterStatus.currentTrack.has_value() &&
+               laterStatus.currentTrack->title == "Second Song",
+           "a timed-out transition read does not poison the following MPD request");
+}
+
+void testMpdMetadataDeadlineReturnsWarningAndKeepsConnectionUsable() {
+    ScriptedMpdServer server{
+        ScriptedMpdServer::Options{.staleReadsAfterTransition = 1000}};
+    if (!server.available()) {
+        std::cout << "SKIP: MPD metadata warning test socket is unavailable\n";
+        return;
+    }
+    x308::MpdConfig config;
+    config.host = server.host();
+    config.port = 0;
+    x308::MpdClient client{config, 2000};
+
+    const auto startedAt = std::chrono::steady_clock::now();
+    const auto next = client.next();
+    const auto elapsed = std::chrono::steady_clock::now() - startedAt;
+    expect(next.success &&
+               next.message.find("Предупреждение") != std::string::npos &&
+               next.message.find("Воспроизведение продолжается") != std::string::npos,
+           "successful Next returns a warning instead of failure when metadata stays stale");
+    expect(elapsed >= std::chrono::milliseconds{2800} &&
+               elapsed < std::chrono::milliseconds{3800},
+           "MPD transition retry respects its three-second total deadline");
+    const auto laterStatus = client.status();
+    expect(laterStatus.available,
+           "MPD remains usable after the metadata transition deadline");
+}
+
+void testMpdConcurrentStatusRequestsAreSerialized() {
+    ScriptedMpdServer server{
+        ScriptedMpdServer::Options{.delayEveryStatus = true}};
+    if (!server.available()) {
+        std::cout << "SKIP: MPD concurrency test socket is unavailable\n";
+        return;
+    }
+    x308::MpdConfig config;
+    config.host = server.host();
+    config.port = 0;
+    x308::MpdClient client{config, 1000};
+    x308::MediaStatus first;
+    x308::MediaStatus second;
+
+    std::thread firstReader{[&] { first = client.status(); }};
+    std::thread secondReader{[&] { second = client.status(); }};
+    firstReader.join();
+    secondReader.join();
+    expect(first.available && second.available,
+           "concurrent callers receive complete serialized MPD responses");
 }
 
 void testMacValidation() {
@@ -756,6 +1155,7 @@ void testBluetoothStartupAutoConnectEnabledAndDisabled() {
 
 void testLinuxAudioOutputUsesBoundedSystemctlOperations() {
     auto runner = std::make_shared<FakeProcessRunner>();
+    runner->scriptedResults.push_back({3, false, {}, {}});
     runner->scriptedResults.push_back({0, false, {}, {}});
     runner->scriptedResults.push_back({0, false, {}, {}});
     x308::AudioConfig config;
@@ -764,12 +1164,13 @@ void testLinuxAudioOutputUsesBoundedSystemctlOperations() {
     const auto result = output.selectSource(x308::AudioSource::bluetooth);
     expect(result.success, "BlueALSA receiver activation is verified");
     expect(runner->invocations == std::vector<std::vector<std::string>>({
-               {"start", "bluealsa-aplay.service"},
-               {"is-active", "--quiet", "bluealsa-aplay.service"}}),
-           "Linux audio output starts and verifies only the configured service");
+               {"--no-ask-password", "is-active", "--quiet", "bluealsa-aplay.service"},
+               {"--no-ask-password", "start", "bluealsa-aplay.service"},
+               {"--no-ask-password", "is-active", "--quiet", "bluealsa-aplay.service"}}),
+           "Linux audio output checks state before a non-interactive service start");
     expect(runner->requestedTimeouts == std::vector<std::chrono::milliseconds>({
-               std::chrono::milliseconds{150}, std::chrono::milliseconds{150}}),
-           "Linux audio operations have a hard configured timeout");
+               std::chrono::seconds{1}, std::chrono::seconds{2}, std::chrono::seconds{1}}),
+           "Linux audio service operations use bounded named timeouts");
     expect(output.currentDevice() == "plughw:CARD=rockchipes8316,DEV=0",
            "Linux audio output reports the configured real ALSA PCM");
 }
@@ -781,6 +1182,98 @@ void testLinuxAudioOutputTimeoutIsReported() {
     const auto result = output.selectSource(x308::AudioSource::mpd);
     expect(!result.success && result.message.find("timed out") != std::string::npos,
            "audio service timeout is reported without changing logical source state");
+}
+
+void testLinuxAudioOutputSkipsAlreadyActiveService() {
+    auto runner = std::make_shared<FakeProcessRunner>();
+    runner->scriptedResults.push_back({0, false, {}, {}});
+    x308::LinuxAudioOutputController output{x308::AudioConfig{}, runner};
+    const auto result = output.selectSource(x308::AudioSource::bluetooth);
+    expect(result.success && result.message.find("already active") != std::string::npos,
+           "active BlueALSA service is accepted without a duplicate start");
+    expect(runner->invocations.size() == 1 &&
+               runner->invocations.front() == std::vector<std::string>({
+                   "--no-ask-password", "is-active", "--quiet", "bluealsa-aplay.service"}),
+           "already-active service performs no systemctl start");
+}
+
+void testLinuxAudioOutputStartErrorButServiceActiveIsWarningSuccess() {
+    auto runner = std::make_shared<FakeProcessRunner>();
+    runner->scriptedResults.push_back({3, false, {}, {}});
+    runner->scriptedResults.push_back({1, false, {}, "Interactive authentication required"});
+    runner->scriptedResults.push_back({0, false, {}, {}});
+    x308::LinuxAudioOutputController output{x308::AudioConfig{}, runner};
+    const auto result = output.selectSource(x308::AudioSource::bluetooth);
+    expect(result.success && result.message.find("Предупреждение") != std::string::npos,
+           "service activation succeeds with a warning when service became active after error");
+}
+
+void testLinuxAudioOutputStartTimeoutButServiceActiveIsSuccess() {
+    auto runner = std::make_shared<FakeProcessRunner>();
+    runner->scriptedResults.push_back({3, false, {}, {}});
+    runner->scriptedResults.push_back({143, true, {}, {}});
+    runner->scriptedResults.push_back({0, false, {}, {}});
+    x308::LinuxAudioOutputController output{x308::AudioConfig{}, runner};
+    const auto result = output.selectSource(x308::AudioSource::bluetooth);
+    expect(result.success,
+           "a timed-out start is accepted when the service is active after the timeout");
+}
+
+void testLinuxAudioOutputAuthorizationFailureRemainsFailure() {
+    auto runner = std::make_shared<FakeProcessRunner>();
+    runner->scriptedResults.push_back({3, false, {}, {}});
+    runner->scriptedResults.push_back({1, false, {}, "Interactive authentication required"});
+    runner->scriptedResults.push_back({3, false, {}, {}});
+    x308::LinuxAudioOutputController output{x308::AudioConfig{}, runner};
+    const auto started = std::chrono::steady_clock::now();
+    const auto result = output.selectSource(x308::AudioSource::bluetooth);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    expect(!result.success && result.message.find("authorization") != std::string::npos,
+           "authorization failure is reported when the service remains inactive");
+    expect(elapsed < std::chrono::seconds{1},
+           "authorization failure does not wait for the old interactive timeout");
+}
+
+void testProcessRunnerDoesNotExposeInteractiveStdin() {
+    x308::PosixProcessRunner runner;
+    const auto result = runner.run(X308_PROCESS_FIXTURE_PATH, {"stdin"}, std::chrono::seconds{1});
+    expect(result.exitCode == 0 && !result.timedOut,
+           "external processes receive non-interactive stdin from /dev/null");
+}
+
+void testSourceManagerUpdatesBluetoothStateOnlyAfterReadiness() {
+    auto runner = std::make_shared<FakeProcessRunner>();
+    runner->scriptedResults.push_back({3, false, {}, {}});
+    runner->scriptedResults.push_back({0, false, {}, {}});
+    runner->scriptedResults.push_back({0, false, {}, {}});
+    x308::LinuxAudioOutputController output{x308::AudioConfig{}, runner};
+    std::vector<std::string> calls;
+    FakeMediaPlayer mpd{calls};
+    x308::SourceManager source{mpd, output};
+
+    const auto result = source.setSource(x308::AudioSource::bluetooth);
+    expect(result.success && source.activeSource() == x308::AudioSource::bluetooth,
+           "source state becomes Bluetooth only after service readiness succeeds");
+    expect(calls == std::vector<std::string>({"mpd.pause", "mpd.release"}),
+           "Bluetooth source activation preserves the MPD pause and release ordering");
+}
+
+void testSourceManagerRollsBackOnlyWhenBluetoothRemainsUnavailable() {
+    auto runner = std::make_shared<FakeProcessRunner>();
+    runner->scriptedResults.push_back({3, false, {}, {}});
+    runner->scriptedResults.push_back({1, false, {}, "Interactive authentication required"});
+    runner->scriptedResults.push_back({3, false, {}, {}});
+    x308::LinuxAudioOutputController output{x308::AudioConfig{}, runner};
+    std::vector<std::string> calls;
+    FakeMediaPlayer mpd{calls};
+    x308::SourceManager source{mpd, output};
+
+    const auto result = source.setSource(x308::AudioSource::bluetooth);
+    expect(!result.success && source.activeSource() == x308::AudioSource::mpd,
+           "MPD remains the active source after genuine Bluetooth readiness failure");
+    expect(calls == std::vector<std::string>({
+               "mpd.pause", "mpd.release", "mpd.activate"}),
+           "MPD rollback is performed only after Bluetooth activation really fails");
 }
 
 void testProcessRunnerCapturesSeparateStreams() {
@@ -960,6 +1453,9 @@ void testCliDispatchUsesInjectedServices() {
     const auto result = cli.run({"mpd", "pause"});
     expect(result == 0 && calls == std::vector<std::string>{"mpd.pause"},
            "CLI dispatches through the injected media player");
+    expect(cli.run({"mpd", "resume"}) == 0 &&
+               calls == std::vector<std::string>({"mpd.pause", "mpd.resume"}),
+           "CLI exposes an explicit MPD resume command");
     expect(error.str().empty(), "successful injected CLI command has no error output");
 }
 
@@ -1021,6 +1517,7 @@ void testCliDispatchesBluetoothMediaCommands() {
 void testInteractiveMenuExposesMpdRuntimeActions() {
     std::vector<std::string> calls;
     FakeMediaPlayer mpd{calls};
+    mpd.playResult = x308::Result::ok("Воспроизведение началось: Test Song — Test Artist");
     FakeBluetooth bluetooth{calls};
     FakeAudioOutput audioOutput{calls};
     x308::SourceManager sourceManager{mpd, audioOutput};
@@ -1029,12 +1526,86 @@ void testInteractiveMenuExposesMpdRuntimeActions() {
     FakeBluetoothMedia bluetoothMedia{calls};
     x308::InteractiveMenu menu{
         &mpd, &bluetooth, &bluetoothMedia, &sourceManager, &systemStatus};
-    std::istringstream input{"2\n4\n13\n16\n0\n0\n"};
+    std::istringstream input{"2\n1\n2\n3\n4\n5\n6\n9\n0\n0\n"};
     std::ostringstream output;
 
     expect(menu.run(input, output) == 0, "interactive MPD actions complete");
-    expect(calls == std::vector<std::string>{"mpd.toggle", "mpd.random", "mpd.repeat"},
-           "menu exposes toggle, random and repeat through the media service");
+    expect(calls == std::vector<std::string>{
+               "mpd.play", "mpd.pause", "mpd.resume", "mpd.stop",
+               "mpd.next", "mpd.previous", "mpd.update"},
+           "menu exposes MPD playback and asynchronous update actions");
+    expect(output.str().find("Воспроизведение началось: Test Song — Test Artist") !=
+               std::string::npos,
+           "menu renders the playback verification result and current track");
+}
+
+void testInteractiveMpdBrowserUsesNumbersAndStartsSelectedTrack() {
+    std::vector<std::string> calls;
+    FakeMediaPlayer mpd{calls};
+    mpd.libraryHandler = [](const std::string_view path) {
+        if (path.empty()) {
+            return std::vector<x308::LibraryEntry>{
+                {"Metallica", true}, {"AC-DC", true}};
+        }
+        if (path == "Metallica") {
+            return std::vector<x308::LibraryEntry>{
+                {"Metallica/Master Of Puppets/02.flac", false},
+                {"Metallica/Master Of Puppets", true}};
+        }
+        if (path == "Metallica/Master Of Puppets") {
+            return std::vector<x308::LibraryEntry>{
+                {"Metallica/Master Of Puppets/02 - Master Of Puppets.flac", false},
+                {"Metallica/Master Of Puppets/01 - Battery.flac", false}};
+        }
+        return std::vector<x308::LibraryEntry>{};
+    };
+    FakeBluetooth bluetooth{calls};
+    FakeAudioOutput audioOutput{calls};
+    x308::SourceManager sourceManager{mpd, audioOutput};
+    x308::SystemStatusService systemStatus{
+        mpd, bluetooth, sourceManager, "/tmp", "test", "Test"};
+    FakeBluetoothMedia bluetoothMedia{calls};
+    x308::InteractiveMenu menu{
+        &mpd, &bluetooth, &bluetoothMedia, &sourceManager, &systemStatus};
+    std::istringstream input{"2\n7\n2\n0\n2\n1\n2\n0\n0\n"};
+    std::ostringstream output;
+
+    expect(menu.run(input, output) == 0, "numeric MPD library browser completes");
+    expect(calls == std::vector<std::string>{
+               "mpd.play-folder:Metallica/Master Of Puppets:"
+               "Metallica/Master Of Puppets/02 - Master Of Puppets.flac"},
+           "numeric browser starts the selected track from its current folder");
+    expect(output.str().find("Текущая папка: Metallica/Master Of Puppets") != std::string::npos &&
+               output.str().find("1. 01 - Battery.flac") != std::string::npos,
+           "numeric browser renders the current folder and sorted track numbers");
+}
+
+void testInteractiveMpdStatusShowsConnectionMetadataAndElapsedTime() {
+    std::vector<std::string> calls;
+    FakeMediaPlayer mpd{calls};
+    mpd.currentStatus.available = true;
+    mpd.currentStatus.state = x308::PlaybackState::playing;
+    mpd.currentStatus.currentTrack =
+        x308::Track{"Artist/Album/song.flac", "Song", "Artist", "Album"};
+    mpd.currentStatus.elapsedMilliseconds = 125000;
+    FakeBluetooth bluetooth{calls};
+    FakeAudioOutput audioOutput{calls};
+    x308::SourceManager sourceManager{mpd, audioOutput};
+    x308::SystemStatusService systemStatus{
+        mpd, bluetooth, sourceManager, "/tmp", "test", "Test"};
+    FakeBluetoothMedia bluetoothMedia{calls};
+    x308::InteractiveMenu menu{
+        &mpd, &bluetooth, &bluetoothMedia, &sourceManager, &systemStatus};
+    std::istringstream input{"2\n8\n0\n0\n"};
+    std::ostringstream output;
+
+    expect(menu.run(input, output) == 0, "interactive MPD status completes");
+    expect(output.str().find("Подключение к MPD: установлено") != std::string::npos &&
+               output.str().find("Исполнитель: Artist") != std::string::npos &&
+               output.str().find("Альбом: Album") != std::string::npos &&
+               output.str().find("Трек: Song") != std::string::npos &&
+               output.str().find("Прошло: 02:05") != std::string::npos,
+           "MPD status renders connection, metadata and elapsed time");
 }
 
 void testInteractiveMenuExposesBluetoothDeviceLists() {
@@ -1068,6 +1639,15 @@ int main() {
     testSourceManagerKeepsSourceWhenOutputSelectionFails();
     testSourceManagerReportsPartialRollbackFailure();
     testMpdModelConversionHandlesMissingTags();
+    testMpdFindsLeafFoldersAndAvoidsImmediateRepeat();
+    testMpdConsumesResponsesAndReadsCurrentTrackAfterCommands();
+    testMpdReadTimeoutHasSpecificDiagnostic();
+    testMpdCurrentSongTimeoutHasSpecificDiagnostic();
+    testMpdNextRetriesStaleMetadataUntilSongChanges();
+    testMpdPreviousRetriesStaleMetadataUntilSongChanges();
+    testMpdTransitionRecoversAfterFirstStatusTimeout();
+    testMpdMetadataDeadlineReturnsWarningAndKeepsConnectionUsable();
+    testMpdConcurrentStatusRequestsAreSerialized();
     testMacValidation();
     testBluetoothParsing();
     testBluetoothUsesSeparatedArgumentsAndRejectsInvalidMac();
@@ -1088,9 +1668,16 @@ int main() {
     testBluetoothStartupAutoConnectEnabledAndDisabled();
     testLinuxAudioOutputUsesBoundedSystemctlOperations();
     testLinuxAudioOutputTimeoutIsReported();
+    testLinuxAudioOutputSkipsAlreadyActiveService();
+    testLinuxAudioOutputStartErrorButServiceActiveIsWarningSuccess();
+    testLinuxAudioOutputStartTimeoutButServiceActiveIsSuccess();
+    testLinuxAudioOutputAuthorizationFailureRemainsFailure();
+    testSourceManagerUpdatesBluetoothStateOnlyAfterReadiness();
+    testSourceManagerRollsBackOnlyWhenBluetoothRemainsUnavailable();
     testProcessRunnerCapturesSeparateStreams();
     testProcessRunnerKillsProcessTreeAtDeadline();
     testProcessRunnerCapsRequestedTimeout();
+    testProcessRunnerDoesNotExposeInteractiveStdin();
     testSystemStatusAggregatesReadOnlyData();
     testSystemStatusHandlesMissingStorage();
     testInteractiveMenuUsesSystemStatusService();
@@ -1100,6 +1687,8 @@ int main() {
     testCliReportsMpdErrorsAndShowsHelp();
     testCliDispatchesBluetoothMediaCommands();
     testInteractiveMenuExposesMpdRuntimeActions();
+    testInteractiveMpdBrowserUsesNumbersAndStartsSelectedTrack();
+    testInteractiveMpdStatusShowsConnectionMetadataAndElapsedTime();
     testInteractiveMenuExposesBluetoothDeviceLists();
     if (failures == 0) {
         std::cout << "All unit tests passed\n";

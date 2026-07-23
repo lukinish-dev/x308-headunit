@@ -1,12 +1,20 @@
 #include "x308/MpdClient.hpp"
 
+#include "x308/Logger.hpp"
+
 #include <mpd/client.h>
+#include <mpd/database.h>
 #include <mpd/output.h>
+#include <mpd/player.h>
 
 #include <algorithm>
 #include <chrono>
+#include <cerrno>
+#include <iterator>
 #include <memory>
+#include <set>
 #include <string>
+#include <thread>
 #include <utility>
 
 namespace x308 {
@@ -18,6 +26,49 @@ using SongPtr = std::unique_ptr<mpd_song, decltype(&mpd_song_free)>;
 using EntityPtr = std::unique_ptr<mpd_entity, decltype(&mpd_entity_free)>;
 using OutputPtr = std::unique_ptr<mpd_output, decltype(&mpd_output_free)>;
 
+constexpr unsigned interactiveStatusTimeoutMilliseconds = 1500;
+constexpr unsigned transitionTransactionTimeoutMilliseconds = 1500;
+constexpr unsigned backgroundStatusTimeoutMilliseconds = 400;
+constexpr auto transitionInitialDelay = std::chrono::milliseconds{150};
+constexpr auto transitionRetryInterval = std::chrono::milliseconds{150};
+constexpr auto transitionRetryWindow = std::chrono::seconds{3};
+
+std::string connectionError(const mpd_connection* connection,
+                            const std::string_view operation) {
+    const char* rawMessage = mpd_connection_get_error_message(connection);
+    const std::string detail = rawMessage == nullptr ? std::string{} : rawMessage;
+    const auto withDetail = [&detail](const std::string_view category) {
+        return detail.empty() ? std::string{category}
+                              : std::string{category} + ": " + detail;
+    };
+    switch (mpd_connection_get_error(connection)) {
+        case MPD_ERROR_TIMEOUT:
+            return withDetail(std::string{operation} + " timed out");
+        case MPD_ERROR_SYSTEM:
+            if (mpd_connection_get_system_error(connection) == ECONNREFUSED) {
+                return withDetail(std::string{operation} + ": MPD connection refused");
+            }
+            return withDetail(std::string{operation} + ": MPD socket error");
+        case MPD_ERROR_RESOLVER:
+            return withDetail(std::string{operation} + ": MPD host resolution failed");
+        case MPD_ERROR_MALFORMED:
+            return withDetail(std::string{operation} + ": malformed MPD response");
+        case MPD_ERROR_CLOSED:
+            return withDetail(std::string{operation} + ": MPD socket closed");
+        case MPD_ERROR_SERVER:
+            return withDetail(std::string{operation} + ": MPD ACK error");
+        case MPD_ERROR_ARGUMENT:
+            return withDetail("Invalid MPD command argument");
+        case MPD_ERROR_STATE:
+            return withDetail("Invalid MPD connection state");
+        case MPD_ERROR_OOM:
+            return withDetail("MPD client allocation failed");
+        case MPD_ERROR_SUCCESS:
+            return std::string{operation} + " failed without an MPD error";
+    }
+    return withDetail("Unknown MPD error");
+}
+
 ConnectionPtr connect(const MpdConfig& config, const unsigned timeout, std::string& error) {
     ConnectionPtr connection{
         mpd_connection_new(config.host.c_str(), config.port, timeout), &mpd_connection_free};
@@ -26,7 +77,7 @@ ConnectionPtr connect(const MpdConfig& config, const unsigned timeout, std::stri
         return connection;
     }
     if (mpd_connection_get_error(connection.get()) != MPD_ERROR_SUCCESS) {
-        error = mpd_connection_get_error_message(connection.get());
+        error = connectionError(connection.get(), "Connect");
         connection.reset();
     } else {
         error.clear();
@@ -40,7 +91,7 @@ Result commandResult(mpd_connection* connection, const bool success, std::string
         error.clear();
         return Result::ok(std::string{action} + " completed");
     }
-    error = mpd_connection_get_error_message(connection);
+    error = connectionError(connection, action);
     return Result::error(error.empty() ? std::string{action} + " failed" : error);
 }
 
@@ -60,6 +111,17 @@ PlaybackState convertState(const mpd_state state) {
     return PlaybackState::unknown;
 }
 
+std::string trackName(const Track& track) {
+    if (!track.title.empty()) return track.title;
+    const auto separator = track.uri.rfind('/');
+    return separator == std::string::npos ? track.uri : track.uri.substr(separator + 1);
+}
+
+std::string trackSummary(const Track& track) {
+    const auto title = trackName(track);
+    return track.artist.empty() ? title : track.artist + " — " + title;
+}
+
 MediaStatus readStatus(const MpdConfig& config, const unsigned timeout, std::string& error) {
     MediaStatus result;
     auto connection = connect(config, timeout, error);
@@ -69,7 +131,7 @@ MediaStatus readStatus(const MpdConfig& config, const unsigned timeout, std::str
     }
     StatusPtr status{mpd_run_status(connection.get()), &mpd_status_free};
     if (!status) {
-        error = mpd_connection_get_error_message(connection.get());
+        error = connectionError(connection.get(), "Read status");
         result.error = error;
         return result;
     }
@@ -77,13 +139,14 @@ MediaStatus readStatus(const MpdConfig& config, const unsigned timeout, std::str
     result.state = convertState(mpd_status_get_state(status.get()));
     result.random = mpd_status_get_random(status.get());
     result.repeat = mpd_status_get_repeat(status.get());
+    result.elapsedMilliseconds = mpd_status_get_elapsed_ms(status.get());
 
     SongPtr song{mpd_run_current_song(connection.get()), &mpd_song_free};
     if (song) {
         result.currentTrack = convertSong(song.get());
         error.clear();
     } else if (mpd_connection_get_error(connection.get()) != MPD_ERROR_SUCCESS) {
-        error = mpd_connection_get_error_message(connection.get());
+        error = connectionError(connection.get(), "Read current song");
         result.error = error;
     } else {
         error.clear();
@@ -93,45 +156,164 @@ MediaStatus readStatus(const MpdConfig& config, const unsigned timeout, std::str
 
 }  // namespace
 
-MpdClient::MpdClient(MpdConfig config, const unsigned timeoutMilliseconds)
-    : config_(std::move(config)), timeoutMilliseconds_(timeoutMilliseconds) {}
+MpdClient::MpdClient(MpdConfig config, const unsigned timeoutMilliseconds, Logger* logger)
+    : config_(std::move(config)),
+      timeoutMilliseconds_(timeoutMilliseconds),
+      logger_(logger),
+      playbackMonitor_([this](const std::stop_token stopToken) {
+          monitorAutomaticPlayback(stopToken);
+      }) {}
+
+MpdClient::~MpdClient() {
+    playbackMonitor_.request_stop();
+    playbackWake_.notify_all();
+    if (playbackMonitor_.joinable()) playbackMonitor_.join();
+}
 
 MediaStatus MpdClient::status() {
-    constexpr unsigned statusTimeoutMilliseconds = 180;
-    constexpr auto immediateFailureWindow = std::chrono::milliseconds{50};
-    const auto timeout = std::min(timeoutMilliseconds_, statusTimeoutMilliseconds);
-    const auto startedAt = std::chrono::steady_clock::now();
-    auto result = readStatus(config_, timeout, lastError_);
-    if (!result.available && result.error == "Timeout" &&
-        std::chrono::steady_clock::now() - startedAt < immediateFailureWindow) {
-        result = readStatus(config_, timeout, lastError_);
-    }
-    return result;
+    const std::lock_guard lock(mutex_);
+    return statusLocked(interactiveStatusTimeoutMilliseconds);
+}
+
+MediaStatus MpdClient::statusLocked(const unsigned requestedTimeoutMilliseconds) {
+    const auto timeout = std::min(timeoutMilliseconds_, requestedTimeoutMilliseconds);
+    return readStatus(config_, timeout, lastError_);
 }
 
 #define X308_MPD_COMMAND(methodName, expression, action) \
     Result MpdClient::methodName() { \
+        const std::lock_guard lock(mutex_); \
         auto connection = connect(config_, timeoutMilliseconds_, lastError_); \
         if (!connection) return Result::error(lastError_); \
         return commandResult(connection.get(), (expression), lastError_, (action)); \
     }
 
-X308_MPD_COMMAND(play, mpd_run_play(connection.get()), "Play")
-X308_MPD_COMMAND(pause, mpd_run_pause(connection.get(), true), "Pause")
-X308_MPD_COMMAND(stop, mpd_run_stop(connection.get()), "Stop")
 X308_MPD_COMMAND(togglePause, mpd_run_toggle_pause(connection.get()), "Toggle pause")
-X308_MPD_COMMAND(next, mpd_run_next(connection.get()), "Next")
-X308_MPD_COMMAND(previous, mpd_run_previous(connection.get()), "Previous")
-X308_MPD_COMMAND(clearQueue, mpd_run_clear(connection.get()), "Clear queue")
 
 #undef X308_MPD_COMMAND
 
+Result MpdClient::play() {
+    const std::lock_guard lock(mutex_);
+    const auto current = statusLocked(500);
+    if (current.available && current.state == PlaybackState::paused) {
+        auto connection = connect(config_, timeoutMilliseconds_, lastError_);
+        if (!connection) return Result::error(lastError_);
+        const auto result = commandResult(
+            connection.get(), mpd_run_play(connection.get()), lastError_, "Resume");
+        if (!result.success) return result;
+        connection.reset();
+        return waitForTrackAfterCommandLocked(
+            "Воспроизведение продолжено.", "Сейчас играет",
+            PlaybackState::playing);
+    }
+
+    if (!manualSelectionMade_) {
+        automaticFolderPlayback_ = true;
+        return startRandomFolderLocked();
+    }
+
+    auto connection = connect(config_, timeoutMilliseconds_, lastError_);
+    if (!connection) return Result::error(lastError_);
+    const auto result = commandResult(
+        connection.get(), mpd_run_play(connection.get()), lastError_, "Play");
+    if (!result.success) return result;
+    connection.reset();
+    return verifyPlaybackLocked();
+}
+
+Result MpdClient::pause() {
+    const std::lock_guard lock(mutex_);
+    auto connection = connect(config_, timeoutMilliseconds_, lastError_);
+    if (!connection) return Result::error(lastError_);
+    const auto command = commandResult(
+        connection.get(), mpd_run_pause(connection.get(), true), lastError_, "Pause");
+    if (!command.success) return command;
+    connection.reset();
+    return waitForTrackAfterCommandLocked(
+        "Воспроизведение приостановлено.", "Текущий трек",
+        PlaybackState::paused);
+}
+
+Result MpdClient::resume() {
+    const std::lock_guard lock(mutex_);
+    auto connection = connect(config_, timeoutMilliseconds_, lastError_);
+    if (!connection) return Result::error(lastError_);
+    const auto result = commandResult(
+        connection.get(), mpd_run_play(connection.get()), lastError_, "Resume");
+    if (!result.success) return result;
+    connection.reset();
+    return waitForTrackAfterCommandLocked(
+        "Воспроизведение продолжено.", "Сейчас играет",
+        PlaybackState::playing);
+}
+
+Result MpdClient::stop() {
+    const std::lock_guard lock(mutex_);
+    automaticFolderPlayback_ = false;
+    auto connection = connect(config_, timeoutMilliseconds_, lastError_);
+    if (!connection) return Result::error(lastError_);
+    const auto result = commandResult(
+        connection.get(), mpd_run_stop(connection.get()), lastError_, "Stop");
+    return result.success ? Result::ok("Воспроизведение остановлено.") : result;
+}
+
+Result MpdClient::next() {
+    const std::lock_guard lock(mutex_);
+    const auto before = statusLocked(transitionTransactionTimeoutMilliseconds);
+    const auto previousUri = before.currentTrack.has_value()
+        ? before.currentTrack->uri : std::string{};
+    const auto expectedState =
+        before.state == PlaybackState::playing || before.state == PlaybackState::paused
+        ? std::optional{before.state} : std::nullopt;
+
+    auto connection = connect(config_, timeoutMilliseconds_, lastError_);
+    if (!connection) return Result::error(lastError_);
+    const auto command = commandResult(
+        connection.get(), mpd_run_next(connection.get()), lastError_, "Next");
+    if (!command.success) return command;
+    connection.reset();
+    return waitForTrackAfterCommandLocked(
+        "Выбран следующий трек.", "Сейчас играет", expectedState,
+        previousUri, !previousUri.empty(), automaticFolderPlayback_, true);
+}
+
+Result MpdClient::previous() {
+    const std::lock_guard lock(mutex_);
+    const auto before = statusLocked(transitionTransactionTimeoutMilliseconds);
+    const auto previousUri = before.currentTrack.has_value()
+        ? before.currentTrack->uri : std::string{};
+    const auto expectedState =
+        before.state == PlaybackState::playing || before.state == PlaybackState::paused
+        ? std::optional{before.state} : std::nullopt;
+
+    auto connection = connect(config_, timeoutMilliseconds_, lastError_);
+    if (!connection) return Result::error(lastError_);
+    const auto command = commandResult(
+        connection.get(), mpd_run_previous(connection.get()), lastError_, "Previous");
+    if (!command.success) return command;
+    connection.reset();
+    return waitForTrackAfterCommandLocked(
+        "Выбран предыдущий трек.", "Сейчас играет", expectedState,
+        previousUri, !previousUri.empty(), false, true);
+}
+
+Result MpdClient::clearQueue() {
+    const std::lock_guard lock(mutex_);
+    automaticFolderPlayback_ = false;
+    manualSelectionMade_ = false;
+    auto connection = connect(config_, timeoutMilliseconds_, lastError_);
+    if (!connection) return Result::error(lastError_);
+    return commandResult(
+        connection.get(), mpd_run_clear(connection.get()), lastError_, "Clear queue");
+}
+
 std::vector<Track> MpdClient::queue() {
+    const std::lock_guard lock(mutex_);
     std::vector<Track> result;
     auto connection = connect(config_, timeoutMilliseconds_, lastError_);
     if (!connection) return result;
     if (!mpd_send_list_queue_meta(connection.get())) {
-        lastError_ = mpd_connection_get_error_message(connection.get());
+        lastError_ = connectionError(connection.get(), "List MPD queue");
         return result;
     }
     while (mpd_song* rawSong = mpd_recv_song(connection.get())) {
@@ -139,7 +321,7 @@ std::vector<Track> MpdClient::queue() {
         result.push_back(convertSong(song.get()));
     }
     if (!mpd_response_finish(connection.get())) {
-        lastError_ = mpd_connection_get_error_message(connection.get());
+        lastError_ = connectionError(connection.get(), "Finish MPD queue response");
         result.clear();
     } else {
         lastError_.clear();
@@ -148,12 +330,17 @@ std::vector<Track> MpdClient::queue() {
 }
 
 std::vector<LibraryEntry> MpdClient::library(const std::string_view path) {
+    const std::lock_guard lock(mutex_);
+    return libraryLocked(path);
+}
+
+std::vector<LibraryEntry> MpdClient::libraryLocked(const std::string_view path) {
     std::vector<LibraryEntry> result;
     auto connection = connect(config_, timeoutMilliseconds_, lastError_);
     if (!connection) return result;
     const std::string pathString{path};
     if (!mpd_send_list_meta(connection.get(), pathString.empty() ? nullptr : pathString.c_str())) {
-        lastError_ = mpd_connection_get_error_message(connection.get());
+        lastError_ = connectionError(connection.get(), "List MPD library");
         return result;
     }
     while (mpd_entity* rawEntity = mpd_recv_entity(connection.get())) {
@@ -166,7 +353,7 @@ std::vector<LibraryEntry> MpdClient::library(const std::string_view path) {
         }
     }
     if (!mpd_response_finish(connection.get())) {
-        lastError_ = mpd_connection_get_error_message(connection.get());
+        lastError_ = connectionError(connection.get(), "Finish MPD library response");
         result.clear();
     } else {
         lastError_.clear();
@@ -174,7 +361,16 @@ std::vector<LibraryEntry> MpdClient::library(const std::string_view path) {
     return result;
 }
 
+Result MpdClient::playFolder(const std::string_view folder,
+                             const std::string_view selectedTrack) {
+    const std::lock_guard lock(mutex_);
+    automaticFolderPlayback_ = false;
+    manualSelectionMade_ = true;
+    return startFolderLocked(folder, selectedTrack, false);
+}
+
 Result MpdClient::add(const std::string_view path) {
+    const std::lock_guard lock(mutex_);
     auto connection = connect(config_, timeoutMilliseconds_, lastError_);
     if (!connection) return Result::error(lastError_);
     const std::string value{path};
@@ -187,6 +383,7 @@ Result MpdClient::addFolder(const std::string_view path) {
 }
 
 Result MpdClient::setRandom(const bool enabled) {
+    const std::lock_guard lock(mutex_);
     auto connection = connect(config_, timeoutMilliseconds_, lastError_);
     if (!connection) return Result::error(lastError_);
     return commandResult(connection.get(), mpd_run_random(connection.get(), enabled),
@@ -194,6 +391,7 @@ Result MpdClient::setRandom(const bool enabled) {
 }
 
 Result MpdClient::setRepeat(const bool enabled) {
+    const std::lock_guard lock(mutex_);
     auto connection = connect(config_, timeoutMilliseconds_, lastError_);
     if (!connection) return Result::error(lastError_);
     return commandResult(connection.get(), mpd_run_repeat(connection.get(), enabled),
@@ -201,11 +399,12 @@ Result MpdClient::setRepeat(const bool enabled) {
 }
 
 Result MpdClient::update() {
+    const std::lock_guard lock(mutex_);
     auto connection = connect(config_, timeoutMilliseconds_, lastError_);
     if (!connection) return Result::error(lastError_);
     const unsigned job = mpd_run_update(connection.get(), nullptr);
     if (job == 0) {
-        lastError_ = mpd_connection_get_error_message(connection.get());
+        lastError_ = connectionError(connection.get(), "Update MPD database");
         return Result::error(lastError_.empty() ? "MPD update request failed" : lastError_);
     }
     lastError_.clear();
@@ -221,10 +420,11 @@ Result MpdClient::releaseAudio() {
 }
 
 Result MpdClient::setAudioOutputEnabled(const bool enabled) {
+    const std::lock_guard lock(mutex_);
     auto connection = connect(config_, timeoutMilliseconds_, lastError_);
     if (!connection) return Result::error(lastError_);
     if (!mpd_send_outputs(connection.get())) {
-        lastError_ = mpd_connection_get_error_message(connection.get());
+        lastError_ = connectionError(connection.get(), "List MPD outputs");
         return Result::error(lastError_);
     }
 
@@ -241,7 +441,7 @@ Result MpdClient::setAudioOutputEnabled(const bool enabled) {
         }
     }
     if (!mpd_response_finish(connection.get())) {
-        lastError_ = mpd_connection_get_error_message(connection.get());
+        lastError_ = connectionError(connection.get(), "Finish MPD outputs response");
         return Result::error(lastError_);
     }
     if (!selectedId.has_value()) {
@@ -261,7 +461,245 @@ Result MpdClient::setAudioOutputEnabled(const bool enabled) {
 }
 
 std::string MpdClient::lastError() const {
+    const std::lock_guard lock(mutex_);
     return lastError_;
+}
+
+std::vector<std::string> MpdClient::playableFoldersFromUris(
+    const std::vector<std::string>& uris) {
+    std::set<std::string> foldersWithTracks;
+    for (const auto& uri : uris) {
+        const auto separator = uri.rfind('/');
+        foldersWithTracks.insert(
+            separator == std::string::npos ? std::string{} : uri.substr(0, separator));
+    }
+    std::vector<std::string> leafFolders;
+    for (const auto& folder : foldersWithTracks) {
+        const auto prefix = folder.empty() ? std::string{} : folder + '/';
+        const auto hasPlayableChild = std::any_of(
+            foldersWithTracks.begin(), foldersWithTracks.end(),
+            [&folder, &prefix](const std::string& other) {
+                if (other == folder) return false;
+                return folder.empty() || other.starts_with(prefix);
+            });
+        if (!hasPlayableChild) leafFolders.push_back(folder);
+    }
+    return leafFolders;
+}
+
+std::vector<std::string> MpdClient::nextFolderCandidates(
+    const std::vector<std::string>& folders, const std::string_view previousFolder) {
+    if (folders.size() <= 1) return folders;
+    std::vector<std::string> result;
+    std::copy_if(folders.begin(), folders.end(), std::back_inserter(result),
+                 [previousFolder](const std::string& folder) {
+                     return folder != previousFolder;
+                 });
+    return result.empty() ? folders : result;
+}
+
+std::vector<std::string> MpdClient::playableFoldersLocked() {
+    std::vector<std::string> uris;
+    auto connection = connect(config_, timeoutMilliseconds_, lastError_);
+    if (!connection) return {};
+    if (!mpd_send_list_all(connection.get(), nullptr)) {
+        lastError_ = connectionError(connection.get(), "List all MPD songs");
+        return {};
+    }
+    while (mpd_entity* rawEntity = mpd_recv_entity(connection.get())) {
+        EntityPtr entity{rawEntity, &mpd_entity_free};
+        if (mpd_entity_get_type(entity.get()) == MPD_ENTITY_TYPE_SONG) {
+            uris.emplace_back(mpd_song_get_uri(mpd_entity_get_song(entity.get())));
+        }
+    }
+    if (!mpd_response_finish(connection.get())) {
+        lastError_ = connectionError(connection.get(), "Finish MPD song list response");
+        return {};
+    }
+    lastError_.clear();
+    return playableFoldersFromUris(uris);
+}
+
+std::vector<std::string> MpdClient::folderTracksLocked(const std::string_view folder) {
+    std::vector<std::string> tracks;
+    for (const auto& entry : libraryLocked(folder)) {
+        if (!entry.directory) tracks.push_back(entry.path);
+    }
+    std::sort(tracks.begin(), tracks.end());
+    return tracks;
+}
+
+Result MpdClient::startFolderLocked(const std::string_view folder,
+                                    const std::string_view selectedTrack,
+                                    const bool automatic) {
+    const auto tracks = folderTracksLocked(folder);
+    if (tracks.empty()) {
+        const auto folderName = folder.empty() ? std::string{"корень библиотеки"}
+                                                : std::string{folder};
+        lastError_ = "В папке нет доступных аудиотреков: " + folderName;
+        logWarning("MPD folder has no playable tracks: " + std::string{folder});
+        return Result::error(lastError_);
+    }
+
+    std::size_t selectedPosition = 0;
+    if (!selectedTrack.empty()) {
+        const auto selected = std::find(tracks.begin(), tracks.end(), selectedTrack);
+        if (selected == tracks.end()) {
+            lastError_ = "Выбранный трек отсутствует в папке MPD";
+            return Result::error(lastError_);
+        }
+        selectedPosition = static_cast<std::size_t>(std::distance(tracks.begin(), selected));
+    }
+
+    auto connection = connect(config_, timeoutMilliseconds_, lastError_);
+    if (!connection) return Result::error(lastError_);
+    if (!mpd_run_clear(connection.get()) ||
+        !mpd_run_random(connection.get(), false) ||
+        !mpd_run_repeat(connection.get(), false)) {
+        lastError_ = connectionError(connection.get(), "Prepare MPD queue");
+        return Result::error(lastError_.empty() ? "Не удалось подготовить очередь MPD" : lastError_);
+    }
+    for (const auto& track : tracks) {
+        if (!mpd_run_add(connection.get(), track.c_str())) {
+            lastError_ = connectionError(connection.get(), "Add track to MPD queue");
+            return Result::error(lastError_.empty() ? "Не удалось добавить трек в очередь MPD"
+                                                    : lastError_);
+        }
+    }
+    if (!mpd_run_play_pos(connection.get(), static_cast<unsigned>(selectedPosition))) {
+        lastError_ = connectionError(connection.get(), "Start MPD folder playback");
+        return Result::error(lastError_.empty() ? "MPD не начал воспроизведение" : lastError_);
+    }
+    connection.reset();
+
+    const auto mode = automatic ? "automatic" : "manual";
+    logInfo("MPD " + std::string{mode} + " folder playback started: " +
+            std::string{folder} + ", track index " + std::to_string(selectedPosition));
+    return verifyPlaybackLocked();
+}
+
+Result MpdClient::startRandomFolderLocked() {
+    const auto folders = playableFoldersLocked();
+    if (folders.empty()) {
+        lastError_ = lastError_.empty() ? "В библиотеке MPD нет папок с аудиотреками"
+                                        : lastError_;
+        automaticFolderPlayback_ = false;
+        logWarning("MPD automatic folder playback cannot find playable folders");
+        return Result::error(lastError_);
+    }
+    const auto candidates = nextFolderCandidates(folders, previousAutomaticFolder_);
+    std::uniform_int_distribution<std::size_t> distribution{0, candidates.size() - 1};
+    const auto& selectedFolder = candidates[distribution(randomEngine_)];
+    previousAutomaticFolder_ = selectedFolder;
+    automaticFolderPlayback_ = true;
+    return startFolderLocked(selectedFolder, {}, true);
+}
+
+Result MpdClient::verifyPlaybackLocked() {
+    return waitForTrackAfterCommandLocked(
+        "Воспроизведение успешно запущено.", "Сейчас играет",
+        PlaybackState::playing);
+}
+
+Result MpdClient::waitForTrackAfterCommandLocked(
+    const std::string_view completedMessage, const std::string_view trackLabel,
+    const std::optional<PlaybackState> expectedState,
+    const std::string_view previousUri, const bool requireTrackChange,
+    const bool advanceAutomaticFolderOnStop,
+    const bool metadataFailureIsWarning) {
+    const auto deadline = std::chrono::steady_clock::now() + transitionRetryWindow;
+    MediaStatus lastStatus;
+    std::optional<MediaStatus> lastAvailableStatus;
+    std::this_thread::sleep_for(transitionInitialDelay);
+
+    while (true) {
+        lastStatus = statusLocked(transitionTransactionTimeoutMilliseconds);
+        if (lastStatus.available) lastAvailableStatus = lastStatus;
+        if (advanceAutomaticFolderOnStop && lastStatus.available &&
+            lastStatus.state == PlaybackState::stopped) {
+            return startRandomFolderLocked();
+        }
+        const bool stateMatches = !expectedState.has_value() ||
+                                  lastStatus.state == *expectedState;
+        const bool hasTrack = lastStatus.currentTrack.has_value();
+        const bool trackMatches = hasTrack &&
+            (!requireTrackChange || lastStatus.currentTrack->uri != previousUri);
+        if (lastStatus.available && stateMatches && trackMatches) {
+            lastError_.clear();
+            return Result::ok(std::string{completedMessage} + "\n" +
+                              std::string{trackLabel} + ": " +
+                              trackSummary(*lastStatus.currentTrack));
+        }
+
+        if (std::chrono::steady_clock::now() >= deadline) break;
+        std::this_thread::sleep_for(transitionRetryInterval);
+    }
+
+    const auto warning = [&](std::string diagnostic) {
+        if (!metadataFailureIsWarning) {
+            return Result::error(std::string{completedMessage} + " " + diagnostic);
+        }
+        lastError_.clear();
+        return Result::ok(std::string{completedMessage} +
+                          "\nПредупреждение: трек переключён, но актуальные метаданные "
+                          "не удалось получить за 3 с.\n" +
+                          diagnostic + "\nВоспроизведение продолжается.");
+    };
+
+    if (!lastAvailableStatus.has_value()) {
+        lastError_ = lastStatus.error.empty()
+            ? "MPD status response was unavailable"
+            : lastStatus.error;
+        return warning("Последняя ошибка чтения: " + lastError_);
+    }
+    const auto& availableStatus = *lastAvailableStatus;
+    if (availableStatus.state == PlaybackState::stopped &&
+        !availableStatus.currentTrack.has_value()) {
+        lastError_ = "MPD is stopped and has no current song";
+        return warning("MPD остановлен, текущий трек отсутствует.");
+    }
+    if (!availableStatus.currentTrack.has_value()) {
+        if (!availableStatus.error.empty()) {
+            lastError_ = availableStatus.error;
+            return warning("Последняя ошибка чтения: " + lastError_);
+        }
+        lastError_ = "MPD response has no current song metadata";
+        return warning("MPD не вернул метаданные текущего трека.");
+    }
+    if (requireTrackChange && availableStatus.currentTrack->uri == previousUri) {
+        lastError_ = "MPD current song did not change before the retry deadline";
+        return warning("MPD продолжает возвращать метаданные предыдущего трека.");
+    }
+
+    lastError_ = "MPD playback state did not reach the expected value";
+    return warning("Состояние воспроизведения не обновилось за 3 с.");
+}
+
+void MpdClient::monitorAutomaticPlayback(const std::stop_token stopToken) {
+    using namespace std::chrono_literals;
+    std::unique_lock lock(mutex_);
+    while (!stopToken.stop_requested()) {
+        playbackWake_.wait_for(lock, 500ms, [&stopToken] {
+            return stopToken.stop_requested();
+        });
+        if (stopToken.stop_requested()) return;
+        if (!automaticFolderPlayback_) continue;
+        const auto current = statusLocked(backgroundStatusTimeoutMilliseconds);
+        if (!current.available || current.state != PlaybackState::stopped) continue;
+
+        const auto result = startRandomFolderLocked();
+        if (!result.success) {
+            logWarning("MPD automatic folder transition failed: " + result.message);
+        }
+    }
+}
+
+void MpdClient::logInfo(const std::string_view message) const {
+    if (logger_ != nullptr) logger_->log(LogLevel::info, message);
+}
+
+void MpdClient::logWarning(const std::string_view message) const {
+    if (logger_ != nullptr) logger_->log(LogLevel::warning, message);
 }
 
 Track MpdClient::trackFromMetadata(std::string uri, const char* title, const char* artist,

@@ -10,20 +10,25 @@
 
 namespace x308 {
 
+class Logger;
+
 class LinuxAudioOutputController final : public IAudioOutput {
 public:
     LinuxAudioOutputController(AudioConfig config,
-                               std::shared_ptr<IProcessRunner> processRunner);
+                               std::shared_ptr<IProcessRunner> processRunner,
+                               Logger* logger = nullptr);
 
     [[nodiscard]] Result selectSource(AudioSource source) override;
     [[nodiscard]] std::string currentDevice() const override;
 
 private:
+    [[nodiscard]] ProcessResult serviceState() const;
+    [[nodiscard]] Result waitForServiceState(bool active) const;
     [[nodiscard]] Result setBluealsaAplayActive(bool active);
 
     AudioConfig config_;
     std::shared_ptr<IProcessRunner> processRunner_;
-    std::chrono::milliseconds timeout_;
+    Logger* logger_;
 };
 
 }  // namespace x308

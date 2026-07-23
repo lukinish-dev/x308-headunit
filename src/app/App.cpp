@@ -76,14 +76,15 @@ int Application::run(const int argc, const char* const* argv) {
         context->processRunner = std::make_shared<PosixProcessRunner>();
         const auto timeout = static_cast<unsigned>(
             configuration.application.startupTimeoutSeconds) * 1000U;
-        context->mpd = std::make_unique<MpdClient>(configuration.mpd, timeout);
+        context->mpd = std::make_unique<MpdClient>(
+            configuration.mpd, timeout, context->logger.get());
         context->bluetooth = std::make_unique<BluetoothCtlManager>(
             configuration.bluetooth, context->processRunner, context->logger.get());
         context->bluetoothMedia = std::make_unique<BluezDbusMediaController>(
             context->processRunner,
             std::chrono::milliseconds{configuration.bluetooth.mediaDbusTimeoutMilliseconds});
         context->audioOutput = std::make_unique<LinuxAudioOutputController>(
-            configuration.audio, context->processRunner);
+            configuration.audio, context->processRunner, context->logger.get());
 
         const auto initialSource = configuration.audio.defaultSource == "bluetooth"
             ? AudioSource::bluetooth : AudioSource::mpd;

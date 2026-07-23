@@ -12,6 +12,10 @@ int main(const int argc, const char* const* argv) {
         std::cerr << "fixture stderr\n";
         return 7;
     }
+    if (mode == "stdin") {
+        char character = '\0';
+        return std::cin.get(character) ? 1 : 0;
+    }
     if (mode == "hang-tree") {
         static_cast<void>(signal(SIGTERM, SIG_IGN));
         const pid_t descendant = fork();

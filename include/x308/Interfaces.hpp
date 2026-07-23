@@ -16,6 +16,7 @@ public:
     [[nodiscard]] virtual MediaStatus status() = 0;
     [[nodiscard]] virtual Result play() = 0;
     [[nodiscard]] virtual Result pause() = 0;
+    [[nodiscard]] virtual Result resume() = 0;
     [[nodiscard]] virtual Result stop() = 0;
     [[nodiscard]] virtual Result togglePause() = 0;
     [[nodiscard]] virtual Result next() = 0;
@@ -23,6 +24,8 @@ public:
     [[nodiscard]] virtual std::vector<Track> queue() = 0;
     [[nodiscard]] virtual Result clearQueue() = 0;
     [[nodiscard]] virtual std::vector<LibraryEntry> library(std::string_view path) = 0;
+    [[nodiscard]] virtual Result playFolder(std::string_view folder,
+                                            std::string_view selectedTrack) = 0;
     [[nodiscard]] virtual Result add(std::string_view path) = 0;
     [[nodiscard]] virtual Result addFolder(std::string_view path) = 0;
     [[nodiscard]] virtual Result setRandom(bool enabled) = 0;

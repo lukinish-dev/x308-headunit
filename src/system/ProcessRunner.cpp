@@ -104,6 +104,9 @@ ProcessResult PosixProcessRunner::run(const std::string_view executable,
         static_cast<void>(setpgid(0, 0));
         static_cast<void>(dup2(outputPipe[1], STDOUT_FILENO));
         static_cast<void>(dup2(errorPipe[1], STDERR_FILENO));
+        int nullInput = open("/dev/null", O_RDONLY | O_CLOEXEC);
+        if (nullInput < 0 || dup2(nullInput, STDIN_FILENO) < 0) _exit(126);
+        closeFd(nullInput);
         closeFd(outputPipe[0]); closeFd(outputPipe[1]);
         closeFd(errorPipe[0]); closeFd(errorPipe[1]);
         execvp(executableString.c_str(), argv.data());

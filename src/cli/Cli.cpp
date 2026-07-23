@@ -32,7 +32,7 @@ void printTrack(const Track& track, std::ostream& output) {
 
 int printResult(const Result& result, std::ostream& output, std::ostream& error) {
     if (result.success) {
-        output << "Готово: операция выполнена.\n";
+        output << (result.message.empty() ? "Операция выполнена." : result.message) << '\n';
         return 0;
     }
     error << "Ошибка: " << result.message << '\n';
@@ -122,6 +122,7 @@ std::string CliParser::helpText() {
         "  status         Показать состояние системы\n"
         "  source ...     Управление источником\n"
         "  mpd ...        Управление MPD\n"
+        "    play | pause | resume | stop | next | previous | status | update\n"
         "  bluetooth ...  Устройства Bluetooth и AVRCP\n"
         "    current | play | pause | toggle | next | previous\n";
 }
@@ -166,10 +167,15 @@ int Cli::run(const std::vector<std::string>& command) const {
             }
             if (status.currentTrack.has_value()) printTrack(*status.currentTrack, output_);
             else output_ << "Текущий трек отсутствует.\n";
+            if (status.elapsedMilliseconds.has_value()) {
+                output_ << "Прошло: " << mediaTime(*status.elapsedMilliseconds) << '\n';
+            }
+            if (!status.error.empty()) output_ << "Диагностика: " << status.error << '\n';
             return 0;
         }
         if (action == "play") return printResult(mediaPlayer_.play(), output_, error_);
         if (action == "pause") return printResult(mediaPlayer_.pause(), output_, error_);
+        if (action == "resume") return printResult(mediaPlayer_.resume(), output_, error_);
         if (action == "stop") return printResult(mediaPlayer_.stop(), output_, error_);
         if (action == "toggle") return printResult(mediaPlayer_.togglePause(), output_, error_);
         if (action == "next") return printResult(mediaPlayer_.next(), output_, error_);

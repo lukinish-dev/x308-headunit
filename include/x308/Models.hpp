@@ -36,6 +36,7 @@ struct MediaStatus {
     bool random{false};
     bool repeat{false};
     std::optional<Track> currentTrack;
+    std::optional<std::uint64_t> elapsedMilliseconds;
     std::string error;
 };
 
