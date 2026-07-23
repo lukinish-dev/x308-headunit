@@ -91,12 +91,12 @@ D-Bus он выполняет ObjectManager discovery, читает свойст
 передаются раздельно через `IProcessRunner`; каждый вызов имеет hard timeout.
 Отсутствие player возвращается как обычный unavailable status.
 
-`LinuxAudioOutputController` переключает receiver service:
+`LinuxAudioOutputController` управляет receiver service:
 
 - Bluetooth: `systemctl start bluealsa-aplay.service`, затем bounded
   `is-active` verification;
-- MPD: `systemctl stop bluealsa-aplay.service`, затем verification освобождения
-  PCM.
+- MPD: сервис не останавливается; AVRCP Pause и включение MPD output передают
+  ALSA MPD без `systemctl stop`.
 
 `MpdClient` отдельно включает/отключает настроенный MPD output `ES8316` через
 libmpdclient. `SourceManager` сохраняет единоличное владение логическим active

@@ -82,6 +82,13 @@ Result LinuxAudioOutputController::waitForServiceState(const bool active) const 
 }
 
 Result LinuxAudioOutputController::setBluealsaAplayActive(const bool active) {
+    if (!active) {
+        if (logger_ != nullptr) {
+            logger_->log(LogLevel::info,
+                         "Bluetooth audio service remains active while MPD takes the ALSA PCM");
+        }
+        return Result::ok("MPD audio selected; Bluetooth audio service remains active.");
+    }
     const auto current = serviceState();
     if (current.timedOut) {
         return Result::error("bluealsa-aplay service state query timed out");
@@ -97,49 +104,36 @@ Result LinuxAudioOutputController::setBluealsaAplayActive(const bool active) {
         }
         return Result::ok("Bluetooth audio service is already active.");
     }
-    if (!active && !alreadyActive) {
-        if (logger_ != nullptr) {
-            logger_->log(LogLevel::info, "Bluetooth audio service is already inactive");
-        }
-        return Result::ok("Bluetooth audio service is already inactive.");
-    }
-
-    const std::string action = active ? "start" : "stop";
     const auto change = processRunner_->run(
-        "systemctl", {"--no-ask-password", action, config_.bluealsaAplayService},
+        "systemctl", {"--no-ask-password", "start", config_.bluealsaAplayService},
         serviceStartTimeout);
     if (change.exitCode != 0 || change.timedOut) {
         const auto afterFailure = serviceState();
         if (!afterFailure.timedOut &&
-            (active ? afterFailure.exitCode == 0 : afterFailure.exitCode != 0)) {
+            afterFailure.exitCode == 0) {
             if (logger_ != nullptr) {
                 logger_->log(LogLevel::warning,
-                             "systemctl " + action + " failed, but Bluetooth audio service " +
-                                 (active ? "became active" : "is inactive"));
+                             "systemctl start failed, but Bluetooth audio service became active");
             }
-            return Result::ok("Предупреждение: systemctl " + action +
-                              " завершился с ошибкой, но состояние Bluetooth audio готово.");
+            return Result::ok("Предупреждение: systemctl start завершился с ошибкой, "
+                              "но состояние Bluetooth audio готово.");
         }
         if (change.timedOut) {
-            return Result::error("systemctl " + action +
-                                 " timed out and Bluetooth audio service remains " +
-                                 (active ? "inactive" : "active"));
+            return Result::error("systemctl start timed out and Bluetooth audio service remains inactive");
         }
         return Result::error(processFailure(
-            change, "systemctl " + action + " (non-interactive authorization unavailable)"));
+            change, "systemctl start (non-interactive authorization unavailable)"));
     }
 
     const auto readiness = waitForServiceState(active);
     if (!readiness.success) {
-        return Result::error("Bluetooth audio service " + action + " succeeded, but " +
+        return Result::error("Bluetooth audio service start succeeded, but " +
                              readiness.message);
     }
     if (logger_ != nullptr) {
-        logger_->log(LogLevel::info, active ? "Bluetooth audio service started"
-                                            : "Bluetooth audio service stopped");
+        logger_->log(LogLevel::info, "Bluetooth audio service started");
     }
-    return Result::ok(active ? "Bluetooth audio service started."
-                             : "Bluetooth audio service stopped.");
+    return Result::ok("Bluetooth audio service started.");
 }
 
 Result LinuxAudioOutputController::selectSource(const AudioSource source) {

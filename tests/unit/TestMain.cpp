@@ -1280,8 +1280,8 @@ void testLinuxAudioOutputTimeoutIsReported() {
     runner->nextResult = {143, true, {}, {}};
     x308::LinuxAudioOutputController output{x308::AudioConfig{}, runner};
     const auto result = output.selectSource(x308::AudioSource::mpd);
-    expect(!result.success && result.message.find("timed out") != std::string::npos,
-           "audio service timeout is reported without changing logical source state");
+    expect(result.success && runner->invocations.empty(),
+           "MPD selection does not stop bluealsa-aplay or invoke systemctl");
 }
 
 void testLinuxAudioOutputSkipsAlreadyActiveService() {

@@ -131,10 +131,10 @@ busctl introspect org.bluez /org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF
 1. При активном A2DP stream выберите MPD в том же интерактивном процессе.
 2. Проверьте `mpc status`, `bluealsa-aplay --list-pcms` и ALSA/journal errors.
 
-Ожидается: `bluealsa-aplay.service` остановлен и перестал удерживать PCM, затем
-MPD output `ES8316` включён. При ошибке Bluetooth receiver восстанавливается
-либо возвращается явный partial failure. Не считайте тест пройденным, если MPD
-не открыл ES8316 или оба backend конкурируют за устройство.
+Ожидается: iPhone поставлен на паузу через AVRCP, `bluealsa-aplay.service` не
+останавливается, а MPD output `ES8316` включён до команды Play. При ошибке
+возвращается явный partial failure. Не считайте тест пройденным, если MPD не
+открыл ES8316 или оба backend конкурируют за устройство.
 
 ## 9. Проверка после reboot
 
