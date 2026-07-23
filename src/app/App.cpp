@@ -11,6 +11,7 @@
 #include "x308/Logger.hpp"
 #include "x308/MpdClient.hpp"
 #include "x308/ProcessRunner.hpp"
+#include "x308/PlaybackSourceMonitor.hpp"
 #include "x308/SourceManager.hpp"
 #include "x308/SystemStatusService.hpp"
 
@@ -89,7 +90,8 @@ int Application::run(const int argc, const char* const* argv) {
         const auto initialSource = configuration.audio.defaultSource == "bluetooth"
             ? AudioSource::bluetooth : AudioSource::mpd;
         context->sourceManager = std::make_unique<SourceManager>(
-            *context->mpd, *context->audioOutput, initialSource);
+            *context->mpd, *context->audioOutput, initialSource,
+            context->bluetoothMedia.get(), context->logger.get());
         context->systemStatus = std::make_unique<SystemStatusService>(
             *context->mpd, *context->bluetooth, *context->sourceManager,
             configuration.mpd.musicDirectory, X308_VERSION, X308_BUILD_TYPE,
@@ -114,6 +116,8 @@ int Application::run(const int argc, const char* const* argv) {
                                  "Bluetooth startup auto-connect completed: " +
                                      autoConnect.message);
         }
+        context->playbackSourceMonitor = std::make_unique<PlaybackSourceMonitor>(
+            *context->bluetoothMedia, *context->sourceManager, context->logger.get());
 
         context_ = std::move(context);
         state_ = ApplicationState::running;

@@ -11,6 +11,7 @@
 #include "x308/InteractiveMenu.hpp"
 #include "x308/LinuxAudioOutputController.hpp"
 #include "x308/Logger.hpp"
+#include "x308/PlaybackSourceMonitor.hpp"
 
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -455,6 +456,105 @@ void testSourceManagerReportsPartialRollbackFailure() {
            "source switch reports a failed rollback as partial failure");
     expect(manager.activeSource() == x308::AudioSource::mpd,
            "partial failure does not change the logical source owner");
+}
+
+void testPlaybackSourceManagerUsesLastPlaybackEvent() {
+    std::vector<std::string> calls;
+    FakeMediaPlayer mpd{calls};
+    FakeAudioOutput output{calls};
+    FakeBluetoothMedia bluetoothMedia{calls};
+    x308::SourceManager manager{mpd, output, x308::AudioSource::mpd, &bluetoothMedia};
+
+    expect(manager.onPlaybackStarted(x308::AudioSource::bluetooth,
+                                    "Bluetooth playback started").success,
+           "Bluetooth playback event switches the active source");
+    expect(manager.onPlaybackStarted(x308::AudioSource::mpd, "MPD Play command").success,
+           "later MPD playback event switches the active source back");
+    expect(manager.activeSource() == x308::AudioSource::mpd,
+           "last processed playback event owns the source");
+    expect(calls == std::vector<std::string>{
+               "mpd.pause", "mpd.release", "audio.bluetooth", "bt-media.pause",
+               "audio.mpd", "mpd.activate"},
+           "source switch pauses the previous player and changes ALSA in order");
+}
+
+void testPlaybackSourceManagerAvoidsRepeatedActiveTransition() {
+    std::vector<std::string> calls;
+    FakeMediaPlayer mpd{calls};
+    FakeAudioOutput output{calls};
+    x308::SourceManager manager{mpd, output};
+
+    expect(manager.onPlaybackStarted(x308::AudioSource::mpd, "MPD Play command").success,
+           "playback event on active MPD succeeds");
+    expect(calls.empty(), "repeated active playback does not change audio routing");
+}
+
+void testPlaybackSourceManagerPreparesMpdBeforePlaying() {
+    std::vector<std::string> calls;
+    FakeMediaPlayer mpd{calls};
+    FakeAudioOutput output{calls};
+    FakeBluetoothMedia bluetoothMedia{calls};
+    x308::SourceManager manager{mpd, output, x308::AudioSource::bluetooth, &bluetoothMedia};
+
+    expect(manager.prepareForPlayback(x308::AudioSource::mpd, "MPD Play command").success,
+           "MPD audio preparation succeeds while Bluetooth is active");
+    expect(manager.activeSource() == x308::AudioSource::bluetooth,
+           "preparing MPD does not publish it as active before playback starts");
+    expect(manager.onPlaybackStarted(x308::AudioSource::mpd, "MPD Play command").success,
+           "MPD Playing commits the prepared source");
+    expect(manager.activeSource() == x308::AudioSource::mpd,
+           "MPD becomes active after playback is confirmed");
+    expect(calls == std::vector<std::string>{"bt-media.pause", "audio.mpd", "mpd.activate"},
+           "Bluetooth is paused and MPD ALSA is ready before MPD Play");
+}
+
+void testMpdPlaybackPreparationFailureKeepsBluetoothActive() {
+    std::vector<std::string> calls;
+    FakeMediaPlayer mpd{calls};
+    FakeAudioOutput output{calls};
+    output.selectionResult = x308::Result::error("ALSA output is busy");
+    FakeBluetoothMedia bluetoothMedia{calls};
+    x308::SourceManager manager{mpd, output, x308::AudioSource::bluetooth, &bluetoothMedia};
+
+    expect(!manager.prepareForPlayback(x308::AudioSource::mpd, "MPD Play command").success,
+           "MPD playback preparation reports ALSA failure");
+    expect(manager.activeSource() == x308::AudioSource::bluetooth,
+           "failed preparation leaves Bluetooth as the active source");
+    expect(calls == std::vector<std::string>{"bt-media.pause", "audio.mpd"},
+           "MPD playback is not started when ALSA preparation fails");
+}
+
+void testBluetoothPlayingMonitorIgnoresConnectionAndDetectsPlayback() {
+    std::vector<std::string> calls;
+    FakeMediaPlayer mpd{calls};
+    FakeAudioOutput output{calls};
+    FakeBluetoothMedia bluetoothMedia{calls};
+    x308::SourceManager manager{mpd, output, x308::AudioSource::mpd, &bluetoothMedia};
+    x308::PlaybackSourceMonitor monitor{bluetoothMedia, manager, nullptr, false};
+
+    bluetoothMedia.currentStatus.available = true;
+    bluetoothMedia.currentStatus.connected = true;
+    bluetoothMedia.currentStatus.state = x308::PlaybackState::paused;
+    monitor.pollOnce();
+    expect(manager.activeSource() == x308::AudioSource::mpd,
+           "Bluetooth connection without playback keeps MPD active");
+
+    bluetoothMedia.currentStatus.state = x308::PlaybackState::playing;
+    monitor.pollOnce();
+    expect(manager.activeSource() == x308::AudioSource::bluetooth,
+           "Bluetooth Playing event becomes active automatically");
+
+    bluetoothMedia.currentStatus.state = x308::PlaybackState::paused;
+    monitor.pollOnce();
+    expect(manager.activeSource() == x308::AudioSource::bluetooth,
+           "Bluetooth pause does not resume MPD automatically");
+
+    const auto callsAfterFirstPlayback = calls;
+    bluetoothMedia.currentStatus.state = x308::PlaybackState::playing;
+    monitor.pollOnce();
+    expect(calls.size() == callsAfterFirstPlayback.size() + 1 &&
+               calls.back() == "bt-media.status",
+           "repeated Bluetooth Play keeps the existing audio routing");
 }
 
 void testMpdModelConversionHandlesMissingTags() {
@@ -1459,6 +1559,28 @@ void testCliDispatchUsesInjectedServices() {
     expect(error.str().empty(), "successful injected CLI command has no error output");
 }
 
+void testCliPreparesMpdAudioBeforePlay() {
+    std::vector<std::string> calls;
+    FakeMediaPlayer mpd{calls};
+    FakeBluetooth bluetooth{calls};
+    FakeAudioOutput output{calls};
+    FakeBluetoothMedia bluetoothMedia{calls};
+    x308::SourceManager sourceManager{mpd, output, x308::AudioSource::bluetooth, &bluetoothMedia};
+    x308::SystemStatusService systemStatus{
+        mpd, bluetooth, sourceManager, "/tmp", "test", "Test"};
+    std::ostringstream rendered;
+    std::ostringstream error;
+    x308::Cli cli{
+        mpd, bluetooth, bluetoothMedia, sourceManager, systemStatus, rendered, error};
+
+    expect(cli.run({"mpd", "play"}) == 0, "CLI MPD Play succeeds after source preparation");
+    expect(sourceManager.activeSource() == x308::AudioSource::mpd,
+           "CLI MPD Play changes the active source after playback starts");
+    expect(calls == std::vector<std::string>{
+               "bt-media.pause", "audio.mpd", "mpd.activate", "mpd.play"},
+           "CLI prepares ALSA before sending MPD Play");
+}
+
 void testCliReportsMpdErrorsAndShowsHelp() {
     std::vector<std::string> calls;
     FakeMediaPlayer mpd{calls};
@@ -1638,6 +1760,11 @@ int main() {
     testSourceManagerSwitchesToMpdWithoutPowerOff();
     testSourceManagerKeepsSourceWhenOutputSelectionFails();
     testSourceManagerReportsPartialRollbackFailure();
+    testPlaybackSourceManagerUsesLastPlaybackEvent();
+    testPlaybackSourceManagerAvoidsRepeatedActiveTransition();
+    testPlaybackSourceManagerPreparesMpdBeforePlaying();
+    testMpdPlaybackPreparationFailureKeepsBluetoothActive();
+    testBluetoothPlayingMonitorIgnoresConnectionAndDetectsPlayback();
     testMpdModelConversionHandlesMissingTags();
     testMpdFindsLeafFoldersAndAvoidsImmediateRepeat();
     testMpdConsumesResponsesAndReadsCurrentTrackAfterCommands();
@@ -1684,6 +1811,7 @@ int main() {
     testSystemStatusCollectsModuleStatusesConcurrently();
     testApplicationLifecycleAndComposition();
     testCliDispatchUsesInjectedServices();
+    testCliPreparesMpdAudioBeforePlay();
     testCliReportsMpdErrorsAndShowsHelp();
     testCliDispatchesBluetoothMediaCommands();
     testInteractiveMenuExposesMpdRuntimeActions();

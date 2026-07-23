@@ -13,6 +13,7 @@ class Logger;
 class MpdClient;
 class LinuxAudioOutputController;
 class PosixProcessRunner;
+class PlaybackSourceMonitor;
 class SourceManager;
 class SystemStatusService;
 
@@ -31,6 +32,7 @@ struct AppContext {
     std::unique_ptr<BluezDbusMediaController> bluetoothMedia;
     std::unique_ptr<LinuxAudioOutputController> audioOutput;
     std::unique_ptr<SourceManager> sourceManager;
+    std::unique_ptr<PlaybackSourceMonitor> playbackSourceMonitor;
     std::unique_ptr<SystemStatusService> systemStatus;
     std::unique_ptr<Cli> cli;
     std::unique_ptr<InteractiveMenu> interactiveMenu;

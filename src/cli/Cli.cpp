@@ -39,6 +39,32 @@ int printResult(const Result& result, std::ostream& output, std::ostream& error)
     return 1;
 }
 
+Result playbackStarted(Result playback, SourceManager& sourceManager,
+                       const AudioSource source, const std::string_view reason) {
+    if (!playback.success) return playback;
+    const auto switched = sourceManager.onPlaybackStarted(source, reason);
+    if (!switched.success) {
+        return Result::error("Playback started, but source switch failed: " + switched.message);
+    }
+    return playback;
+}
+
+template <typename StartPlayback>
+Result startMpdPlayback(SourceManager& sourceManager, const std::string_view reason,
+                        StartPlayback&& startPlayback) {
+    const auto prepared = sourceManager.prepareForPlayback(AudioSource::mpd, reason);
+    if (!prepared.success) return prepared;
+    const auto playback = startPlayback();
+    if (!playback.success) {
+        const auto cancelled = sourceManager.cancelPreparedPlayback(AudioSource::mpd);
+        if (!cancelled.success) {
+            return Result::error(playback.message + "; audio rollback failed: " + cancelled.message);
+        }
+        return playback;
+    }
+    return playbackStarted(playback, sourceManager, AudioSource::mpd, reason);
+}
+
 bool parseSwitch(const std::string& value, bool& enabled) {
     if (value == "on") {
         enabled = true;
@@ -173,9 +199,11 @@ int Cli::run(const std::vector<std::string>& command) const {
             if (!status.error.empty()) output_ << "Диагностика: " << status.error << '\n';
             return 0;
         }
-        if (action == "play") return printResult(mediaPlayer_.play(), output_, error_);
+        if (action == "play") return printResult(startMpdPlayback(
+            sourceManager_, "MPD Play command", [this] { return mediaPlayer_.play(); }), output_, error_);
         if (action == "pause") return printResult(mediaPlayer_.pause(), output_, error_);
-        if (action == "resume") return printResult(mediaPlayer_.resume(), output_, error_);
+        if (action == "resume") return printResult(startMpdPlayback(
+            sourceManager_, "MPD Resume command", [this] { return mediaPlayer_.resume(); }), output_, error_);
         if (action == "stop") return printResult(mediaPlayer_.stop(), output_, error_);
         if (action == "toggle") return printResult(mediaPlayer_.togglePause(), output_, error_);
         if (action == "next") return printResult(mediaPlayer_.next(), output_, error_);
@@ -247,7 +275,10 @@ int Cli::run(const std::vector<std::string>& command) const {
             return 0;
         }
         if (command.size() == 2 && action == "play") {
-            return printResult(bluetoothMedia_.play(), output_, error_);
+            return printResult(
+                playbackStarted(bluetoothMedia_.play(), sourceManager_,
+                                AudioSource::bluetooth, "Bluetooth AVRCP Play command"),
+                output_, error_);
         }
         if (command.size() == 2 && action == "pause") {
             return printResult(bluetoothMedia_.pause(), output_, error_);

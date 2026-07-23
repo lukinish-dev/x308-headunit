@@ -35,6 +35,33 @@ void showResult(std::ostream& output, const Result& result) {
     else output << "Ошибка: " << result.message << '\n';
 }
 
+Result playbackStarted(Result playback, SourceManager* sourceManager,
+                       const AudioSource source, const std::string_view reason) {
+    if (!playback.success || sourceManager == nullptr) return playback;
+    const auto switched = sourceManager->onPlaybackStarted(source, reason);
+    if (!switched.success) {
+        return Result::error("Playback started, but source switch failed: " + switched.message);
+    }
+    return playback;
+}
+
+template <typename StartPlayback>
+Result startMpdPlayback(SourceManager* sourceManager, const std::string_view reason,
+                        StartPlayback&& startPlayback) {
+    if (sourceManager == nullptr) return startPlayback();
+    const auto prepared = sourceManager->prepareForPlayback(AudioSource::mpd, reason);
+    if (!prepared.success) return prepared;
+    const auto playback = startPlayback();
+    if (!playback.success) {
+        const auto cancelled = sourceManager->cancelPreparedPlayback(AudioSource::mpd);
+        if (!cancelled.success) {
+            return Result::error(playback.message + "; audio rollback failed: " + cancelled.message);
+        }
+        return playback;
+    }
+    return playbackStarted(playback, sourceManager, AudioSource::mpd, reason);
+}
+
 std::optional<std::size_t> menuNumber(const std::string& value) {
     std::size_t number = 0;
     const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), number);
@@ -172,7 +199,9 @@ int InteractiveMenu::runBluetoothMenu(std::istream& input, std::ostream& output)
                 }
             }
         } else if (selection == "19" && bluetoothMedia_ != nullptr) {
-            showResult(output, bluetoothMedia_->play());
+            showResult(output, playbackStarted(bluetoothMedia_->play(), sourceManager_,
+                                               AudioSource::bluetooth,
+                                               "Bluetooth AVRCP Play command"));
         } else if (selection == "20" && bluetoothMedia_ != nullptr) {
             showResult(output, bluetoothMedia_->pause());
         } else if (selection == "21" && bluetoothMedia_ != nullptr) {
@@ -222,9 +251,11 @@ int InteractiveMenu::runMpdMenu(std::istream& input, std::ostream& output) const
                << "9. Обновить библиотеку\n"
                << "0. Назад\n\n> " << std::flush;
         if (!std::getline(input, selection) || selection == "0") return 0;
-        if (selection == "1") showResult(output, mediaPlayer_->play());
+        if (selection == "1") showResult(output, startMpdPlayback(
+            sourceManager_, "MPD Play command", [this] { return mediaPlayer_->play(); }));
         else if (selection == "2") showResult(output, mediaPlayer_->pause());
-        else if (selection == "3") showResult(output, mediaPlayer_->resume());
+        else if (selection == "3") showResult(output, startMpdPlayback(
+            sourceManager_, "MPD Resume command", [this] { return mediaPlayer_->resume(); }));
         else if (selection == "4") showResult(output, mediaPlayer_->stop());
         else if (selection == "5") showResult(output, mediaPlayer_->next());
         else if (selection == "6") showResult(output, mediaPlayer_->previous());
@@ -308,7 +339,10 @@ int InteractiveMenu::runMpdLibraryBrowser(std::istream& input, std::ostream& out
             currentFolder = selected.path;
             continue;
         }
-        showResult(output, mediaPlayer_->playFolder(currentFolder, selected.path));
+        showResult(output, startMpdPlayback(
+            sourceManager_, "MPD library track selected", [this, &currentFolder, &selected] {
+                return mediaPlayer_->playFolder(currentFolder, selected.path);
+            }));
         return 0;
     }
 }

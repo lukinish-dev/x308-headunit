@@ -39,6 +39,7 @@ add_library(x308_core
     src/system/ProcessRunner.cpp
     src/system/LinuxAudioOutputController.cpp
     src/source/SourceManager.cpp
+    src/source/PlaybackSourceMonitor.cpp
     src/system/HardwareStubs.cpp
 )
 

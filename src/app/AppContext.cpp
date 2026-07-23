@@ -9,6 +9,7 @@
 #include "x308/Logger.hpp"
 #include "x308/MpdClient.hpp"
 #include "x308/ProcessRunner.hpp"
+#include "x308/PlaybackSourceMonitor.hpp"
 #include "x308/SourceManager.hpp"
 #include "x308/SystemStatusService.hpp"
 
