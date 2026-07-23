@@ -110,7 +110,7 @@ Result LinuxAudioOutputController::setBluealsaAplayActive(const bool active) {
                      active ? "Starting bluealsa-aplay" : "Stopping bluealsa-aplay");
     }
     const auto change = processRunner_->run(
-        "systemctl", {"--no-ask-password", action, config_.bluealsaAplayService},
+        "sudo", {"-n", "systemctl", action, config_.bluealsaAplayService},
         serviceStartTimeout);
     if (change.exitCode != 0 || change.timedOut) {
         const auto afterFailure = serviceState();

@@ -219,6 +219,7 @@ public:
     std::function<x308::ProcessResult(
         std::string_view, const std::vector<std::string>&, std::chrono::milliseconds)> handler;
     std::vector<std::vector<std::string>> invocations;
+    std::vector<std::string> executables;
     std::vector<std::chrono::milliseconds> requestedTimeouts;
     x308::ProcessResult run(std::string_view value, const std::vector<std::string>& args,
                             std::chrono::milliseconds requestedTimeout) override {
@@ -226,6 +227,7 @@ public:
         arguments = args;
         timeout = requestedTimeout;
         invocations.push_back(args);
+        executables.emplace_back(value);
         requestedTimeouts.push_back(requestedTimeout);
         if (handler) return handler(value, args, requestedTimeout);
         if (!scriptedResults.empty()) {
@@ -1265,9 +1267,11 @@ void testLinuxAudioOutputUsesBoundedSystemctlOperations() {
     expect(result.success, "BlueALSA receiver activation is verified");
     expect(runner->invocations == std::vector<std::vector<std::string>>({
                {"--no-ask-password", "is-active", "--quiet", "bluealsa-aplay.service"},
-               {"--no-ask-password", "start", "bluealsa-aplay.service"},
+               {"-n", "systemctl", "start", "bluealsa-aplay.service"},
                {"--no-ask-password", "is-active", "--quiet", "bluealsa-aplay.service"}}),
            "Linux audio output checks state before a non-interactive service start");
+    expect(runner->executables == std::vector<std::string>{"systemctl", "sudo", "systemctl"},
+           "privileged BlueALSA start is delegated through sudo -n");
     expect(runner->requestedTimeouts == std::vector<std::chrono::milliseconds>({
                std::chrono::seconds{1}, std::chrono::seconds{2}, std::chrono::seconds{1}}),
            "Linux audio service operations use bounded named timeouts");
@@ -1285,9 +1289,35 @@ void testLinuxAudioOutputStopsBeforeMpd() {
     expect(result.success, "MPD selection stops bluealsa-aplay before opening the shared PCM");
     expect(runner->invocations == std::vector<std::vector<std::string>>({
                {"--no-ask-password", "is-active", "--quiet", "bluealsa-aplay.service"},
-               {"--no-ask-password", "stop", "bluealsa-aplay.service"},
+               {"-n", "systemctl", "stop", "bluealsa-aplay.service"},
                {"--no-ask-password", "is-active", "--quiet", "bluealsa-aplay.service"}}),
            "MPD selection uses bounded non-interactive systemctl stop and verifies release");
+    expect(runner->executables == std::vector<std::string>{"systemctl", "sudo", "systemctl"},
+           "privileged BlueALSA stop is delegated through sudo -n");
+}
+
+void testLinuxAudioOutputStopAuthorizationFailureKeepsSourceUnchanged() {
+    auto runner = std::make_shared<FakeProcessRunner>();
+    runner->scriptedResults.push_back({0, false, {}, {}});
+    runner->scriptedResults.push_back({1, false, {}, "Interactive authentication required"});
+    runner->scriptedResults.push_back({0, false, {}, {}});
+    x308::LinuxAudioOutputController output{x308::AudioConfig{}, runner};
+    const auto result = output.selectSource(x308::AudioSource::mpd);
+    expect(!result.success && result.message.find("Interactive authentication required") != std::string::npos,
+           "BlueALSA stop authorization failure is returned with stderr");
+
+    auto transitionRunner = std::make_shared<FakeProcessRunner>();
+    transitionRunner->scriptedResults.push_back({0, false, {}, {}});
+    transitionRunner->scriptedResults.push_back({1, false, {}, "Interactive authentication required"});
+    transitionRunner->scriptedResults.push_back({0, false, {}, {}});
+    x308::LinuxAudioOutputController transitionOutput{x308::AudioConfig{}, transitionRunner};
+    std::vector<std::string> calls;
+    FakeMediaPlayer mpd{calls};
+    x308::SourceManager sourceManager{mpd, transitionOutput, x308::AudioSource::bluetooth};
+    const auto transition = sourceManager.prepareForPlayback(x308::AudioSource::mpd,
+                                                              "MPD Play command");
+    expect(!transition.success && sourceManager.activeSource() == x308::AudioSource::bluetooth,
+           "failed Bluetooth to MPD preparation keeps the active source unchanged");
 }
 
 void testLinuxAudioOutputSkipsAlreadyActiveService() {
@@ -1801,6 +1831,7 @@ int main() {
     testBluetoothStartupAutoConnectEnabledAndDisabled();
     testLinuxAudioOutputUsesBoundedSystemctlOperations();
     testLinuxAudioOutputStopsBeforeMpd();
+    testLinuxAudioOutputStopAuthorizationFailureKeepsSourceUnchanged();
     testLinuxAudioOutputSkipsAlreadyActiveService();
     testLinuxAudioOutputStartErrorButServiceActiveIsWarningSuccess();
     testLinuxAudioOutputStartTimeoutButServiceActiveIsSuccess();
