@@ -72,6 +72,7 @@ private:
     void logInfo(std::string_view message) const;
     void logWarning(std::string_view message) const;
     [[nodiscard]] Result setAudioOutputEnabled(bool enabled);
+    [[nodiscard]] Result setAudioOutputEnabledLocked(bool enabled);
 
     MpdConfig config_;
     unsigned timeoutMilliseconds_;

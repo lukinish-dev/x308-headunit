@@ -510,6 +510,18 @@ void testPlaybackSourceManagerPreparesMpdBeforePlaying() {
            "Bluetooth is paused and MPD ALSA is ready before MPD Play");
 }
 
+void testPlaybackSourceManagerRestoresMpdOutputWhenAlreadyActive() {
+    std::vector<std::string> calls;
+    FakeMediaPlayer mpd{calls};
+    FakeAudioOutput output{calls};
+    x308::SourceManager manager{mpd, output, x308::AudioSource::mpd};
+
+    const auto result = manager.prepareForPlayback(x308::AudioSource::mpd,
+                                                   "MPD Play command");
+    expect(result.success && calls == std::vector<std::string>{"mpd.activate"},
+           "MPD playback preparation re-enables outputs even when MPD is already active");
+}
+
 void testMpdPlaybackPreparationFailureKeepsBluetoothActive() {
     std::vector<std::string> calls;
     FakeMediaPlayer mpd{calls};
@@ -1590,7 +1602,7 @@ void testCliDispatchUsesInjectedServices() {
     expect(result == 0 && calls == std::vector<std::string>{"mpd.pause"},
            "CLI dispatches through the injected media player");
     expect(cli.run({"mpd", "resume"}) == 0 &&
-               calls == std::vector<std::string>({"mpd.pause", "mpd.resume"}),
+               calls == std::vector<std::string>({"mpd.pause", "mpd.activate", "mpd.resume"}),
            "CLI exposes an explicit MPD resume command");
     expect(error.str().empty(), "successful injected CLI command has no error output");
 }
@@ -1689,7 +1701,7 @@ void testInteractiveMenuExposesMpdRuntimeActions() {
 
     expect(menu.run(input, output) == 0, "interactive MPD actions complete");
     expect(calls == std::vector<std::string>{
-               "mpd.play", "mpd.pause", "mpd.resume", "mpd.stop",
+               "mpd.activate", "mpd.play", "mpd.pause", "mpd.activate", "mpd.resume", "mpd.stop",
                "mpd.next", "mpd.previous", "mpd.update"},
            "menu exposes MPD playback and asynchronous update actions");
     expect(output.str().find("Воспроизведение началось: Test Song — Test Artist") !=
@@ -1730,6 +1742,7 @@ void testInteractiveMpdBrowserUsesNumbersAndStartsSelectedTrack() {
 
     expect(menu.run(input, output) == 0, "numeric MPD library browser completes");
     expect(calls == std::vector<std::string>{
+               "mpd.activate",
                "mpd.play-folder:Metallica/Master Of Puppets:"
                "Metallica/Master Of Puppets/02 - Master Of Puppets.flac"},
            "numeric browser starts the selected track from its current folder");
@@ -1799,6 +1812,7 @@ int main() {
     testPlaybackSourceManagerUsesLastPlaybackEvent();
     testPlaybackSourceManagerAvoidsRepeatedActiveTransition();
     testPlaybackSourceManagerPreparesMpdBeforePlaying();
+    testPlaybackSourceManagerRestoresMpdOutputWhenAlreadyActive();
     testMpdPlaybackPreparationFailureKeepsBluetoothActive();
     testBluetoothPlayingMonitorIgnoresConnectionAndDetectsPlayback();
     testMpdModelConversionHandlesMissingTags();

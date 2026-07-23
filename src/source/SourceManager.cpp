@@ -34,7 +34,11 @@ Result SourceManager::prepareForPlayback(const AudioSource source,
     if (source != AudioSource::mpd) {
         return Result::error("Only MPD playback can be prepared before it starts");
     }
-    if (source == activeSource_ || preparedSource_ == source) {
+    if (source == activeSource_) {
+        if (source == AudioSource::mpd) return mpd_.activateAudio();
+        return Result::ok("Playback source is already active");
+    }
+    if (preparedSource_ == source) {
         return Result::ok("MPD audio is already ready");
     }
     if (activeSource_ != AudioSource::bluetooth) {

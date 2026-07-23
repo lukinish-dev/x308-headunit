@@ -133,6 +133,16 @@ std::string trackSummary(const Track& track) {
     return track.artist.empty() ? title : track.artist + " — " + title;
 }
 
+std::string outputSummary(const std::vector<std::string>& outputs) {
+    if (outputs.empty()) return "<none>";
+    std::string result;
+    for (std::size_t index = 0; index < outputs.size(); ++index) {
+        if (index != 0) result += ", ";
+        result += outputs[index];
+    }
+    return result;
+}
+
 MediaStatus readStatus(const MpdConfig& config, const unsigned timeout, std::string& error) {
     MediaStatus result;
     auto connection = connect(config, timeout, error);
@@ -206,6 +216,9 @@ X308_MPD_COMMAND(togglePause, mpd_run_toggle_pause(connection.get()), "Toggle pa
 Result MpdClient::play() {
     const std::lock_guard lock(mutex_);
     logInfo("MPD playback request started");
+    if (const auto output = setAudioOutputEnabledLocked(true); !output.success) {
+        return Result::error("Cannot start MPD playback: " + output.message);
+    }
     const auto current = statusLocked(500);
     if (current.available && current.state == PlaybackState::paused) {
         auto connection = connect(config_, timeoutMilliseconds_, lastError_);
@@ -251,6 +264,9 @@ Result MpdClient::pause() {
 Result MpdClient::resume() {
     const std::lock_guard lock(mutex_);
     logInfo("MPD playback request started");
+    if (const auto output = setAudioOutputEnabledLocked(true); !output.success) {
+        return Result::error("Cannot start MPD playback: " + output.message);
+    }
     auto connection = connect(config_, timeoutMilliseconds_, lastError_);
     if (!connection) return Result::error(lastError_);
     const auto result = commandResult(
@@ -438,6 +454,10 @@ Result MpdClient::releaseAudio() {
 
 Result MpdClient::setAudioOutputEnabled(const bool enabled) {
     const std::lock_guard lock(mutex_);
+    return setAudioOutputEnabledLocked(enabled);
+}
+
+Result MpdClient::setAudioOutputEnabledLocked(const bool enabled) {
     auto connection = connect(config_, timeoutMilliseconds_, lastError_);
     if (!connection) return Result::error(lastError_);
     if (!mpd_send_outputs(connection.get())) {
@@ -447,13 +467,19 @@ Result MpdClient::setAudioOutputEnabled(const bool enabled) {
 
     std::optional<unsigned> selectedId;
     bool currentlyEnabled = false;
+    std::vector<std::string> outputs;
     while (mpd_output* rawOutput = mpd_recv_output(connection.get())) {
         OutputPtr output{rawOutput, &mpd_output_free};
         const char* rawName = mpd_output_get_name(output.get());
         const std::string_view name = rawName == nullptr ? std::string_view{} : rawName;
+        const auto id = mpd_output_get_id(output.get());
+        outputs.emplace_back((name.empty() ? "output " + std::to_string(id)
+                                           : std::string{name}) +
+                             (mpd_output_get_enabled(output.get()) ? " [enabled]"
+                                                                    : " [disabled]"));
         if (!selectedId.has_value() &&
             (config_.audioOutputName.empty() || name == config_.audioOutputName)) {
-            selectedId = mpd_output_get_id(output.get());
+            selectedId = id;
             currentlyEnabled = mpd_output_get_enabled(output.get());
         }
     }
@@ -462,7 +488,8 @@ Result MpdClient::setAudioOutputEnabled(const bool enabled) {
         return Result::error(lastError_);
     }
     if (!selectedId.has_value()) {
-        lastError_ = "MPD audio output not found: " + config_.audioOutputName;
+        lastError_ = "MPD audio output not found: " + config_.audioOutputName +
+                     "; outputs: " + outputSummary(outputs);
         return Result::error(lastError_);
     }
     if (currentlyEnabled == enabled) {
@@ -473,8 +500,15 @@ Result MpdClient::setAudioOutputEnabled(const bool enabled) {
     const bool changed = enabled
         ? mpd_run_enable_output(connection.get(), *selectedId)
         : mpd_run_disable_output(connection.get(), *selectedId);
-    return commandResult(connection.get(), changed, lastError_,
-                         enabled ? "Enable MPD audio output" : "Disable MPD audio output");
+    const auto result = commandResult(
+        connection.get(), changed, lastError_,
+        enabled ? "Enable MPD audio output" : "Disable MPD audio output");
+    if (!result.success) {
+        return Result::error(std::string{enabled ? "Cannot enable" : "Cannot disable"} +
+                             " MPD audio output; outputs: " + outputSummary(outputs) +
+                             "; " + result.message);
+    }
+    return result;
 }
 
 std::string MpdClient::lastError() const {
@@ -566,6 +600,10 @@ Result MpdClient::startFolderLocked(const std::string_view folder,
             return Result::error(lastError_);
         }
         selectedPosition = static_cast<std::size_t>(std::distance(tracks.begin(), selected));
+    }
+
+    if (const auto output = setAudioOutputEnabledLocked(true); !output.success) {
+        return Result::error("Cannot start MPD playback: " + output.message);
     }
 
     auto connection = connect(config_, timeoutMilliseconds_, lastError_);
