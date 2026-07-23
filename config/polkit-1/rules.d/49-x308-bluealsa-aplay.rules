@@ -1,0 +1,10 @@
+// Allows only the x308 runtime user to start or stop the dedicated receiver.
+polkit.addRule(function(action, subject) {
+    if (subject.user === "radxa"
+        && action.id === "org.freedesktop.systemd1.manage-units"
+        && action.lookup("unit") === "bluealsa-aplay.service"
+        && (action.lookup("verb") === "start" || action.lookup("verb") === "stop")) {
+        return polkit.Result.YES;
+    }
+    return polkit.Result.NOT_HANDLED;
+});

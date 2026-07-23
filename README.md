@@ -115,8 +115,10 @@ ordered подключение trusted devices. Ошибка или отсутс
 
 Реальное переключение выполняется командами `source set bluetooth` и
 `source set mpd`. MPD output `ES8316` выключается/включается через libmpdclient.
-При выборе MPD `bluealsa-aplay.service` не останавливается: Bluetooth ставится
-на паузу через AVRCP, а ALSA передаётся MPD без `systemctl stop`.
+При выборе MPD Bluetooth ставится на паузу через AVRCP, затем
+`bluealsa-aplay.service` останавливается и освобождает ALSA PCM. Управление
+service выполняется без интерактивного запроса через ограниченное polkit-правило;
+инструкция находится в [docs/BLUEALSA_APLAY_AUTHORIZATION.md](docs/BLUEALSA_APLAY_AUTHORIZATION.md).
 
 Фактический аудит и риски описаны в
 [docs/BLUETOOTH_RUNTIME.md](docs/BLUETOOTH_RUNTIME.md), полный сценарий с
@@ -133,8 +135,8 @@ iPhone — в [docs/MANUAL_TESTS.md](docs/MANUAL_TESTS.md).
 - PipeWire/WirePlumber и BlueALSA работают одновременно. Выбор одного системного
   Bluetooth audio backend и исключение потенциальной конкуренции требуют
   отдельного согласованного изменения системы.
-- Source switching требует права запуска `bluealsa-aplay.service` при выборе
-  Bluetooth. При отказе active source не меняется, но ошибка посередине может
-  оставить MPD на паузе и будет явно отмечена как partial failure.
+- Source switching требует ограниченного права start/stop
+  `bluealsa-aplay.service`. При отказе active source не меняется, но ошибка
+  посередине может оставить MPD на паузе и будет явно отмечена как partial failure.
 - Состояние `SourceManager` хранится в процессе; для последовательной проверки
   переключений используйте интерактивное меню.

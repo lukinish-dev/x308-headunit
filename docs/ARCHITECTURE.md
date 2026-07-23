@@ -331,9 +331,9 @@ TOML-объекты не передаются в прикладные модул
 
 `IAudioOutput`, `IDspController` и `IInputController` — минимальные точки
 расширения для оборудования. Production использует
-`LinuxAudioOutputController`: он bounded-командой запускает
-`bluealsa-aplay.service` при выборе Bluetooth и проверяет его состояние. При
-выборе MPD сервис не останавливается. `NullDspController` и
+`LinuxAudioOutputController`: он bounded-командами запускает/останавливает
+`bluealsa-aplay.service` и проверяет его состояние. Доступ ограничен polkit
+правилом только для этого unit. `NullDspController` и
 `NullInputController` остаются заглушками отсутствующего оборудования;
 `NullAudioOutput` используется только безопасными тестами.
 
@@ -344,12 +344,10 @@ TOML-объекты не передаются в прикладные модул
 На проверенной Rock Pi MPD и `bluealsa-aplay` настроены на один ALSA PCM
 `plughw:CARD=rockchipes8316,DEV=0`. BlueALSA 4.0.0 запущен только с A2DP Source
 и Sink, без SCO/HFP profiles. Одновременно активны PipeWire, PipeWire Pulse и
-WirePlumber. Приложение запускает `bluealsa-aplay.service` только при выборе
-Bluetooth; при выборе MPD сервис не останавливается, чтобы не требовать
-интерактивную авторизацию. Enable/disable unit и конфигурацию
-PipeWire/WirePlumber оно не меняет. Операция требует разрешения systemd/polkit
-только для запуска и подробно описана в
-`BLUETOOTH_RUNTIME.md`.
+WirePlumber. При явно запрошенном source switch приложение меняет runtime state
+только `bluealsa-aplay.service`; enable/disable unit и конфигурацию
+PipeWire/WirePlumber оно не меняет. Операция разрешена ограниченным
+systemd/polkit правилом и подробно описана в `BLUETOOTH_RUNTIME.md`.
 
 ## 12. SystemStatus
 

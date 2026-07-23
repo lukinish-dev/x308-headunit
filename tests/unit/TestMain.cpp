@@ -1275,13 +1275,19 @@ void testLinuxAudioOutputUsesBoundedSystemctlOperations() {
            "Linux audio output reports the configured real ALSA PCM");
 }
 
-void testLinuxAudioOutputTimeoutIsReported() {
+void testLinuxAudioOutputStopsBeforeMpd() {
     auto runner = std::make_shared<FakeProcessRunner>();
-    runner->nextResult = {143, true, {}, {}};
+    runner->scriptedResults.push_back({0, false, {}, {}});
+    runner->scriptedResults.push_back({0, false, {}, {}});
+    runner->scriptedResults.push_back({3, false, {}, {}});
     x308::LinuxAudioOutputController output{x308::AudioConfig{}, runner};
     const auto result = output.selectSource(x308::AudioSource::mpd);
-    expect(result.success && runner->invocations.empty(),
-           "MPD selection does not stop bluealsa-aplay or invoke systemctl");
+    expect(result.success, "MPD selection stops bluealsa-aplay before opening the shared PCM");
+    expect(runner->invocations == std::vector<std::vector<std::string>>({
+               {"--no-ask-password", "is-active", "--quiet", "bluealsa-aplay.service"},
+               {"--no-ask-password", "stop", "bluealsa-aplay.service"},
+               {"--no-ask-password", "is-active", "--quiet", "bluealsa-aplay.service"}}),
+           "MPD selection uses bounded non-interactive systemctl stop and verifies release");
 }
 
 void testLinuxAudioOutputSkipsAlreadyActiveService() {
@@ -1794,7 +1800,7 @@ int main() {
     testBluezDbusTimeoutIsReported();
     testBluetoothStartupAutoConnectEnabledAndDisabled();
     testLinuxAudioOutputUsesBoundedSystemctlOperations();
-    testLinuxAudioOutputTimeoutIsReported();
+    testLinuxAudioOutputStopsBeforeMpd();
     testLinuxAudioOutputSkipsAlreadyActiveService();
     testLinuxAudioOutputStartErrorButServiceActiveIsWarningSuccess();
     testLinuxAudioOutputStartTimeoutButServiceActiveIsSuccess();
