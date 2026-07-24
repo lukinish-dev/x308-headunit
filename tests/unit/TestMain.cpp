@@ -1279,7 +1279,7 @@ void testLinuxAudioOutputUsesBoundedSystemctlOperations() {
     expect(result.success, "BlueALSA receiver activation is verified");
     expect(runner->invocations == std::vector<std::vector<std::string>>({
                {"--no-ask-password", "is-active", "--quiet", "bluealsa-aplay.service"},
-               {"-n", "systemctl", "start", "bluealsa-aplay.service"},
+               {"-n", "/usr/bin/systemctl", "start", "bluealsa-aplay.service"},
                {"--no-ask-password", "is-active", "--quiet", "bluealsa-aplay.service"}}),
            "Linux audio output checks state before a non-interactive service start");
     expect(runner->executables == std::vector<std::string>{"systemctl", "sudo", "systemctl"},
@@ -1301,7 +1301,7 @@ void testLinuxAudioOutputStopsBeforeMpd() {
     expect(result.success, "MPD selection stops bluealsa-aplay before opening the shared PCM");
     expect(runner->invocations == std::vector<std::vector<std::string>>({
                {"--no-ask-password", "is-active", "--quiet", "bluealsa-aplay.service"},
-               {"-n", "systemctl", "stop", "bluealsa-aplay.service"},
+               {"-n", "/usr/bin/systemctl", "stop", "bluealsa-aplay.service"},
                {"--no-ask-password", "is-active", "--quiet", "bluealsa-aplay.service"}}),
            "MPD selection uses bounded non-interactive systemctl stop and verifies release");
     expect(runner->executables == std::vector<std::string>{"systemctl", "sudo", "systemctl"},
@@ -1315,7 +1315,8 @@ void testLinuxAudioOutputStopAuthorizationFailureKeepsSourceUnchanged() {
     runner->scriptedResults.push_back({0, false, {}, {}});
     x308::LinuxAudioOutputController output{x308::AudioConfig{}, runner};
     const auto result = output.selectSource(x308::AudioSource::mpd);
-    expect(!result.success && result.message.find("Interactive authentication required") != std::string::npos,
+    expect(!result.success && result.message.find("SYSTEM_SETUP_REQUIRED") != std::string::npos &&
+               result.message.find("Interactive authentication required") != std::string::npos,
            "BlueALSA stop authorization failure is returned with stderr");
 
     auto transitionRunner = std::make_shared<FakeProcessRunner>();
@@ -1348,7 +1349,7 @@ void testLinuxAudioOutputSkipsAlreadyActiveService() {
 void testLinuxAudioOutputStartErrorButServiceActiveIsWarningSuccess() {
     auto runner = std::make_shared<FakeProcessRunner>();
     runner->scriptedResults.push_back({3, false, {}, {}});
-    runner->scriptedResults.push_back({1, false, {}, "Interactive authentication required"});
+    runner->scriptedResults.push_back({1, false, {}, "transient start failure"});
     runner->scriptedResults.push_back({0, false, {}, {}});
     x308::LinuxAudioOutputController output{x308::AudioConfig{}, runner};
     const auto result = output.selectSource(x308::AudioSource::bluetooth);
@@ -1376,8 +1377,8 @@ void testLinuxAudioOutputAuthorizationFailureRemainsFailure() {
     const auto started = std::chrono::steady_clock::now();
     const auto result = output.selectSource(x308::AudioSource::bluetooth);
     const auto elapsed = std::chrono::steady_clock::now() - started;
-    expect(!result.success && result.message.find("authorization") != std::string::npos,
-           "authorization failure is reported when the service remains inactive");
+    expect(!result.success && result.message.find("SYSTEM_SETUP_REQUIRED") != std::string::npos,
+           "authorization failure is classified as missing system setup");
     expect(elapsed < std::chrono::seconds{1},
            "authorization failure does not wait for the old interactive timeout");
 }

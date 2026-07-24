@@ -120,6 +120,18 @@ ordered подключение trusted devices. Ошибка или отсутс
 service выполняется без интерактивного запроса через ограниченное sudoers-правило;
 инструкция находится в [docs/BLUEALSA_APLAY_AUTHORIZATION.md](docs/BLUEALSA_APLAY_AUTHORIZATION.md).
 
+Перед первым запуском на Rock Pi установите ограниченное право управления
+сервисом и проверьте его:
+
+```bash
+sudo ./scripts/install-system-permissions.sh --user <USER>
+./scripts/check-system-setup.sh
+```
+
+Разрешены только `start`, `stop` и `restart` для `bluealsa-aplay.service`.
+Без этого права переключение завершается `SYSTEM_SETUP_REQUIRED`, а active
+source сохраняется.
+
 Фактический аудит и риски описаны в
 [docs/BLUETOOTH_RUNTIME.md](docs/BLUETOOTH_RUNTIME.md), полный сценарий с
 iPhone — в [docs/MANUAL_TESTS.md](docs/MANUAL_TESTS.md).

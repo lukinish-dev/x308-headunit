@@ -15,8 +15,10 @@
    `timeout --signal=TERM --kill-after=1s 5s <команда>`.
 5. Проверьте `mpc outputs`: output `ES8316` должен существовать, а
    `audio.alsa_pcm` должен совпадать с PCM в `bluealsa-aplay.service`.
-6. Пользователь приложения должен иметь право запускать/останавливать
-   `bluealsa-aplay.service`. Приложение не использует скрытый `sudo`.
+6. Установите право запуска/остановки `bluealsa-aplay.service` командой
+   `sudo ./scripts/install-system-permissions.sh --user <USER>` и проверьте его
+   через `./scripts/check-system-setup.sh`. Приложение использует только
+   неинтерактивный `sudo -n`.
 
 ## Полный обязательный сценарий iPhone
 

@@ -1,1 +1,0 @@
-radxa ALL=(root) NOPASSWD: /usr/bin/systemctl start bluealsa-aplay.service, /usr/bin/systemctl stop bluealsa-aplay.service, /usr/bin/systemctl restart bluealsa-aplay.service

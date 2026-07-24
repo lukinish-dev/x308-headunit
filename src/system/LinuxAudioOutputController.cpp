@@ -36,6 +36,22 @@ std::string processFailure(const ProcessResult& result, const std::string_view a
     return std::string{action} + " failed with exit code " + std::to_string(result.exitCode);
 }
 
+bool isPermissionFailure(const ProcessResult& result) {
+    return result.standardError.find("sudo: a password is required") != std::string::npos ||
+           result.standardError.find("a password is required") != std::string::npos ||
+           result.standardError.find("non-interactive authorization unavailable") != std::string::npos ||
+           result.standardError.find("not allowed to execute") != std::string::npos;
+}
+
+std::string permissionFailureMessage(const std::string_view action,
+                                     const std::string_view detail) {
+    return "SYSTEM_SETUP_REQUIRED\nThe application cannot control bluealsa-aplay.service without a password.\n"
+           "Command: sudo -n /usr/bin/systemctl " + std::string{action} +
+           " bluealsa-aplay.service\nError: " + std::string{detail} +
+           "\nRun on the Rock Pi:\n"
+           "sudo ./scripts/install-system-permissions.sh";
+}
+
 }  // namespace
 
 LinuxAudioOutputController::LinuxAudioOutputController(
@@ -110,9 +126,12 @@ Result LinuxAudioOutputController::setBluealsaAplayActive(const bool active) {
                      active ? "Starting bluealsa-aplay" : "Stopping bluealsa-aplay");
     }
     const auto change = processRunner_->run(
-        "sudo", {"-n", "systemctl", action, config_.bluealsaAplayService},
+        "sudo", {"-n", "/usr/bin/systemctl", action, config_.bluealsaAplayService},
         serviceStartTimeout);
     if (change.exitCode != 0 || change.timedOut) {
+        if (!change.timedOut && isPermissionFailure(change)) {
+            return Result::error(permissionFailureMessage(action, change.standardError));
+        }
         const auto afterFailure = serviceState();
         if (!afterFailure.timedOut &&
             (active ? afterFailure.exitCode == 0 : afterFailure.exitCode != 0)) {
